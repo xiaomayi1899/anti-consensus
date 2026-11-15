@@ -20,9 +20,9 @@
   var LIVE_DATA_URL = "https://xiaomayi1899.github.io/lucky-numbers/data/lottery.json";
   var REFRESH_MS = 60 * 1000;
   var RECO_MS = 5 * 60 * 1000;
-  var LS_DATA = "lottery.cache.v1";
-  var LS_GAME = "contrarian.game.v1";
-  var LS_WINDOW = "contrarian.window.v1";
+  var LS_DATA = "anti.lottery.cache.v1";
+  var LS_GAME = "anti.contrarian.game.v1";
+  var LS_WINDOW = "anti.contrarian.window.v1";
 
   var LUCKY = { 6: 1, 8: 1, 9: 1, 16: 1, 18: 1, 28: 1 };
 
@@ -325,22 +325,103 @@
     return { omit: omit, avgOmit: avgOmit, maxOmit: maxOmit };
   }
 
-  function simulatePunters(pool, k, heat10Norm, heat30Norm, rng) {
-    var counts = zeroMap(pool);
-    var weights = [];
+  function isNeighborOf(n, arr) {
+    for (var i = 0; i < arr.length; i++) if (Math.abs(arr[i] - n) === 1) return true;
+    return false;
+  }
+
+  function isDiagonalOf(n, prev, prev2) {
+    for (var i = 0; i < prev.length; i++) {
+      var p = prev[i];
+      if (Math.abs(p - n) === 1) {
+        var dir = n - p;
+        if (prev2.indexOf(p - dir) >= 0) return true;
+      }
+    }
+    return false;
+  }
+
+  /* 走势图信号：热、冷、重号、邻号、斜连、区间、尾数、空档 */
+  function buildSignals(game, draws, pool, target, heat10Norm, heat30Norm, omitNorm, last, prev, prev2) {
+    var cuts = zoneCuts(game);
+    var zoneSum = {}, zoneCnt = {}, tailSum = {}, tailCnt = {};
     for (var i = 0; i < pool.length; i++) {
       var n = pool[i];
-      var w = 1;
-      if (n <= 31) w *= 1.8;
-      if (isLucky(n)) w *= 1.45;
-      if (isTaboo(n)) w *= 0.45;
-      if (n % 5 === 0) w *= 1.15;
-      w *= 1 + 1.4 * (heat10Norm[n] || 0);
-      w *= 1 + 0.5 * (heat30Norm[n] || 0);
-      if (n > 31) w *= 0.35;
-      weights.push(w);
+      var z = zoneIndex(n, cuts);
+      var t = n % 10;
+      zoneSum[z] = (zoneSum[z] || 0) + (heat10Norm[n] || 0);
+      zoneCnt[z] = (zoneCnt[z] || 0) + 1;
+      tailSum[t] = (tailSum[t] || 0) + (heat10Norm[n] || 0);
+      tailCnt[t] = (tailCnt[t] || 0) + 1;
     }
+    var last5 = draws.slice(0, 5);
+    var signals = {};
+    for (var j = 0; j < pool.length; j++) {
+      var v = pool[j];
+      var zone = zoneIndex(v, cuts);
+      var tail = v % 10;
+      var repeat = last.indexOf(v) >= 0 ? 1 : 0;
+      var neighbor = isNeighborOf(v, last) ? 1 : 0;
+      var diagonal = isDiagonalOf(v, prev, prev2) ? 1 : 0;
+      var gap5 = 1;
+      for (var d = 0; d < last5.length; d++) {
+        var vals = target === "special" ? E.specialNumbers(game, last5[d]) : E.mainNumbers(game, last5[d]);
+        if (vals.indexOf(v) >= 0) { gap5 = 0; break; }
+      }
+      var zoneHeat = zoneCnt[zone] ? zoneSum[zone] / zoneCnt[zone] : 0;
+      var tailHeat = tailCnt[tail] ? tailSum[tail] / tailCnt[tail] : 0;
+      var trend = 0.30 * (heat10Norm[v] || 0) +
+        0.15 * (heat30Norm[v] || 0) +
+        0.18 * (omitNorm[v] || 0) +
+        0.10 * repeat +
+        0.10 * neighbor +
+        0.10 * diagonal +
+        0.04 * zoneHeat +
+        0.03 * tailHeat +
+        (v <= 31 ? 0.015 : 0);
+      signals[v] = {
+        hot10: heat10Norm[v] || 0,
+        hot30: heat30Norm[v] || 0,
+        omitNorm: omitNorm[v] || 0,
+        repeat: repeat,
+        neighbor: neighbor,
+        diagonal: diagonal,
+        gap5: gap5,
+        zoneHeat: zoneHeat,
+        tailHeat: tailHeat,
+        trendScore: clamp(trend, 0, 1),
+      };
+    }
+    return signals;
+  }
+
+  /* 模拟 2000 个“看走势图选号”的彩民：追热、补冷、重号、邻号、斜连、区间、尾数、均衡 */
+  function simulatePunters(pool, k, signals, rng) {
+    var styles = [
+      { w: 24, f: function (s) { return 0.1 + 2 * s.hot10 + 0.4 * s.hot30; } },
+      { w: 18, f: function (s) { return 0.1 + 2 * s.omitNorm + 0.5 * s.gap5; } },
+      { w: 12, f: function (s) { return 0.1 + 3 * s.repeat + 0.2 * s.hot10; } },
+      { w: 12, f: function (s) { return 0.1 + 3 * s.neighbor + 0.2 * s.hot10; } },
+      { w: 10, f: function (s) { return 0.1 + 3 * s.diagonal + 0.2 * s.hot10; } },
+      { w: 10, f: function (s) { return 0.1 + 2 * s.zoneHeat + 0.3 * s.hot10; } },
+      { w: 7, f: function (s) { return 0.1 + 2 * s.tailHeat + 0.3 * s.hot10; } },
+      { w: 7, f: function (s) { return 0.1 + 0.8 * s.hot30 + 0.6 * s.omitNorm + 0.2; } },
+    ];
+    var total = 0;
+    for (var si = 0; si < styles.length; si++) total += styles[si].w;
+    var counts = zeroMap(pool);
     for (var t = 0; t < 2000; t++) {
+      var r = rng() * total, acc = 0, idx = 0;
+      for (; idx < styles.length; idx++) {
+        acc += styles[idx].w;
+        if (r <= acc) break;
+      }
+      if (idx >= styles.length) idx = styles.length - 1;
+      var style = styles[idx];
+      var weights = [];
+      for (var wi = 0; wi < pool.length; wi++) {
+        weights.push(Math.max(0.01, style.f(signals[pool[wi]])));
+      }
       var pick = weightedSample(pool, weights, k, rng);
       for (var j = 0; j < pick.length; j++) counts[pick[j]] += 1;
     }
@@ -351,39 +432,31 @@
     return out;
   }
 
-  function buildInfo(pool, heat10Norm, heat30Norm, omitNorm, omitData, sim, lastDraw) {
+  function buildInfo(pool, signals, sim, omitData) {
     var info = {};
     for (var i = 0; i < pool.length; i++) {
       var n = pool[i];
-      var rule = 50;
-      if (n <= 31) rule += 18; else rule -= 12;
-      if (isLucky(n)) rule += 12;
-      if (isTaboo(n)) rule -= 10;
-      if (n % 5 === 0) rule += 4;
-      rule += 10 * (heat10Norm[n] || 0);
-      rule += 6 * (heat30Norm[n] || 0);
-      rule += 5 * (omitNorm[n] || 0);
-      if (lastDraw.indexOf(n) >= 0) rule += 8;
-      rule = clamp(rule, 0, 100);
-      var simScore = (sim[n] || 0) * 100;
-      var consensus = clamp(0.55 * rule + 0.45 * simScore, 0, 100);
-
+      var s = signals[n];
+      var trend = clamp((s.trendScore || 0) * 100, 0, 100);
+      var consensus = clamp(0.55 * trend + 0.45 * (sim[n] || 0) * 100, 0, 100);
       var tags = [];
-      if (n > 31) tags.push("非生日"); else tags.push("生日");
-      if (isLucky(n)) tags.push("吉利");
-      if (isTaboo(n)) tags.push("尾4");
-      if ((heat10Norm[n] || 0) >= 0.7) tags.push("热号");
+      if (s.hot10 >= 0.7) tags.push("热号");
       if (omitData.omit[n] >= Math.max(5, omitData.avgOmit[n] * 1.5)) tags.push("高遗漏");
-      if (lastDraw.indexOf(n) >= 0) tags.push("上期");
-      if ((heat30Norm[n] || 0) <= 0.15) tags.push("冷号");
-
+      if (s.repeat) tags.push("重号");
+      if (s.neighbor) tags.push("邻号");
+      if (s.diagonal) tags.push("斜连");
+      if (s.zoneHeat >= 0.75) tags.push("热区");
+      if (s.tailHeat >= 0.75) tags.push("热尾");
+      if (s.gap5) tags.push("空档");
+      if (n > 31) tags.push("非生日");
+      if (!tags.length) tags.push("中性");
       info[n] = {
         n: n,
-        rule: rule,
+        trend: trend,
         sim: sim[n] || 0,
         consensus: consensus,
-        heat10: heat10Norm[n] || 0,
-        heat30: heat30Norm[n] || 0,
+        heat10: s.hot10,
+        heat30: s.hot30,
         omit: omitData.omit[n],
         avgOmit: omitData.avgOmit[n],
         tags: tags,
@@ -401,6 +474,10 @@
     var specialPool = game.specialCount ? range(game.specialMin, game.specialMax) : [];
     var lastMain = E.mainNumbers(game, last);
     var lastSpecial = E.specialNumbers(game, last);
+    var prevMain = draws[1] ? E.mainNumbers(game, draws[1]) : [];
+    var prev2Main = draws[2] ? E.mainNumbers(game, draws[2]) : [];
+    var prevSpecial = draws[1] ? E.specialNumbers(game, draws[1]) : [];
+    var prev2Special = draws[2] ? E.specialNumbers(game, draws[2]) : [];
 
     var heat10 = countNumbers(draws.slice(0, 10), game, "main", mainPool);
     var heat30 = countNumbers(draws.slice(0, 30), game, "main", mainPool);
@@ -408,10 +485,12 @@
     var heat10Norm = normalizeMap(heat10, mainPool);
     var heat30Norm = normalizeMap(heat30, mainPool);
     var omitNorm = normalizeMap(omitData.omit, mainPool);
-    var sim = simulatePunters(mainPool, game.mainCount, heat10Norm, heat30Norm, rng);
-    var mainInfo = buildInfo(mainPool, heat10Norm, heat30Norm, omitNorm, omitData, sim, lastMain);
+    var signals = buildSignals(game, draws, mainPool, "main", heat10Norm, heat30Norm, omitNorm, lastMain, prevMain, prev2Main);
+    var sim = simulatePunters(mainPool, game.mainCount, signals, rng);
+    var mainInfo = buildInfo(mainPool, signals, sim, omitData);
 
     var specialInfo = null;
+    var specialSignals = null;
     if (specialPool.length) {
       var sHeat10 = countNumbers(draws.slice(0, 10), game, "special", specialPool);
       var sHeat30 = countNumbers(draws.slice(0, 30), game, "special", specialPool);
@@ -419,8 +498,9 @@
       var sHeat10Norm = normalizeMap(sHeat10, specialPool);
       var sHeat30Norm = normalizeMap(sHeat30, specialPool);
       var sOmitNorm = normalizeMap(sOmitData.omit, specialPool);
-      var sSim = simulatePunters(specialPool, game.specialCount, sHeat10Norm, sHeat30Norm, rng);
-      specialInfo = buildInfo(specialPool, sHeat10Norm, sHeat30Norm, sOmitNorm, sOmitData, sSim, lastSpecial);
+      specialSignals = buildSignals(game, draws, specialPool, "special", sHeat10Norm, sHeat30Norm, sOmitNorm, lastSpecial, prevSpecial, prev2Special);
+      var sSim = simulatePunters(specialPool, game.specialCount, specialSignals, rng);
+      specialInfo = buildInfo(specialPool, specialSignals, sSim, sOmitData);
     }
 
     var sums = [];
@@ -452,10 +532,12 @@
     return {
       game: game, gameId: gameId, window: windowSize, draws: draws,
       last: last, lastMain: lastMain, lastSpecial: lastSpecial,
+      prevMain: prevMain, prev2Main: prev2Main,
       mainPool: mainPool, specialPool: specialPool,
       heat10: heat10, heat30: heat30, omit: omitData.omit,
       avgOmit: omitData.avgOmit, maxOmit: omitData.maxOmit,
       heat10Norm: heat10Norm, heat30Norm: heat30Norm, omitNorm: omitNorm,
+      signals: signals, specialSignals: specialSignals,
       mainInfo: mainInfo, specialInfo: specialInfo,
       sums: sums, meanSum: meanSum, stdSum: stdSum, formRows: formRows,
       zoneCuts: cuts, bigCut: cutBig,
@@ -467,65 +549,63 @@
   function combinationRaw(nums, a) {
     var k = nums.length;
     var info = a.mainInfo;
-    var birthday = 0, lucky = 0, taboo = 0, nonBirthday = 0;
-    var heat10 = 0, heat30 = 0, omitRatio = 0, sim = 0;
-    var odd = 0, big = 0, highOmit = 0;
+    var signals = a.signals;
+    var avgConsensus = 0, odd = 0, big = 0;
+    var hot = 0, cold = 0, neighbors = 0, diagonals = 0, gaps = 0;
     for (var i = 0; i < nums.length; i++) {
       var n = nums[i];
       var f = info[n];
-      if (n <= 31) birthday += 1; else nonBirthday += 1;
-      if (isLucky(n)) lucky += 1;
-      if (isTaboo(n)) taboo += 1;
+      var s = signals[n];
+      avgConsensus += f.consensus;
       if (n % 2) odd += 1;
       if (n > a.bigCut) big += 1;
-      heat10 += f.heat10;
-      heat30 += f.heat30;
-      omitRatio += clamp(f.omit / Math.max(1, a.window), 0, 1);
-      if (f.omit >= Math.max(5, f.avgOmit * 1.5)) highOmit += 1;
-      sim += f.sim;
+      if (f.heat10 >= 0.7) hot += 1;
+      if (f.omit >= Math.max(5, f.avgOmit * 1.5)) cold += 1;
+      if (s.neighbor) neighbors += 1;
+      if (s.diagonal) diagonals += 1;
+      if (s.gap5) gaps += 1;
     }
-    heat10 /= k; heat30 /= k; omitRatio /= k; sim /= k;
+    avgConsensus /= k;
 
     var zones = zoneCounts(nums, a.zoneCuts);
     var idealOdd = k / 2, idealBig = k / 2, idealZone = k / zones.length;
-    var dev = Math.abs(odd - idealOdd) / k + Math.abs(big - idealBig) / k;
     var zoneDev = 0;
     for (var z = 0; z < zones.length; z++) zoneDev += Math.abs(zones[z] - idealZone);
-    dev += zoneDev / k;
-    var balance = clamp(1 - dev / 3, 0, 1);
-
-    var s = sum(nums);
-    var sumZ = Math.abs(s - a.meanSum) / (a.stdSum || 1);
+    var sumZ = Math.abs(sum(nums) - a.meanSum) / (a.stdSum || 1);
+    var repeat = intersection(nums, a.lastMain).length;
     var consec = consecutivePairs(nums);
     var tails = sameTailPairs(nums);
-    var repeats = intersection(nums, a.lastMain).length;
+    var emptyZones = 0;
+    for (var e = 0; e < zones.length; e++) if (zones[e] === 0) emptyZones += 1;
 
     var penalty = 0;
     var allOdd = odd === k, allEven = odd === 0;
     var allBig = big === k, allSmall = big === 0;
     var allOneZone = zones.some(function (x) { return x === k; });
-    if (allOdd || allEven) penalty += 10;
+    if (allOdd || allEven) penalty += 8;
     if (allBig || allSmall) penalty += 8;
-    if (allOneZone) penalty += 10;
-    if (tails >= k - 1 && k > 2) penalty += 12;
-    if (isArithmetic(nums)) penalty += 12;
-    if (maxRun(nums) >= 4) penalty += 10;
-    if (nums.length === k && nums[0] === 1 && nums[k - 1] === k) penalty += 15;
+    if (allOneZone) penalty += 8;
+    if (tails >= k - 1 && k > 2) penalty += 8;
+    if (isArithmetic(nums)) penalty += 8;
+    if (maxRun(nums) >= 4) penalty += 6;
 
-    return 26 * (birthday / k) +
-      12 * (lucky / k) -
-      9 * (taboo / k) +
-      18 * heat10 +
-      6 * heat30 +
-      8 * omitRatio +
-      16 * balance +
+    return 0.42 * avgConsensus +
       12 * Math.exp(-sumZ * sumZ / 2) +
-      7 * (consec === 0 ? 1 : 0) +
-      7 * (repeats === 0 ? 1 : 0) +
-      5 * (tails === 0 ? 1 : 0) +
-      14 * sim -
-      12 * (nonBirthday / k) +
-      (highOmit > 2 ? (highOmit - 2) * 7 : 0) +
+      10 * clamp(1 - Math.abs(odd - idealOdd) / k, 0, 1) +
+      8 * clamp(1 - Math.abs(big - idealBig) / k, 0, 1) +
+      10 * clamp(1 - zoneDev / k, 0, 1) +
+      12 * Math.exp(-Math.pow(repeat - 1, 2)) +
+      8 * Math.exp(-Math.pow(neighbors - 1, 2)) +
+      8 * Math.exp(-Math.pow(diagonals - 1, 2)) +
+      5 * Math.exp(-Math.pow(hot - 2, 2)) +
+      5 * Math.exp(-Math.pow(cold - 1, 2)) +
+      4 * Math.exp(-Math.pow(gaps - 1, 2)) +
+      4 * Math.exp(-Math.pow(consec - 1, 2)) +
+      3 * Math.exp(-Math.pow(tails - 1, 2)) -
+      10 * emptyZones +
+      (cold > 2 ? (cold - 2) * 8 : 0) +
+      (neighbors > 2 ? (neighbors - 2) * 6 : 0) +
+      (gaps > 2 ? (gaps - 2) * 4 : 0) +
       penalty;
   }
 
@@ -542,19 +622,11 @@
       nums = nums.slice().sort(function (x, y) { return x - y; });
       var key = nums.join(",");
       if (key === lastKey || seen[key]) return;
-      if (!nums.some(function (n) { return n > 31; })) return;
-      if (!nums.some(isTaboo)) return;
-      var highOmit = 0;
-      for (var qi = 0; qi < nums.length; qi++) {
-        var fi = a.mainInfo[nums[qi]];
-        if (fi.omit >= Math.max(5, fi.avgOmit * 1.5)) highOmit += 1;
-      }
-      if (highOmit > 2) return;
       seen[key] = 1;
       out.push({ nums: nums, key: key, raw: combinationRaw(nums, a) });
     }
     for (var t = 0; t < 9000; t++) {
-      if (t < 7200) add(weightedSample(pool, weights, k, rng));
+      if (t < 8200) add(weightedSample(pool, weights, k, rng));
       else add(shuffle(pool, rng).slice(0, k));
     }
     if (!out.length) {
@@ -577,14 +649,9 @@
     var typical = [];
     for (var i = 0; i < pool.length; i++) {
       var n = pool[i];
-      var w = 1;
-      if (n <= 31) w *= 1.7;
-      if (isLucky(n)) w *= 1.4;
-      if (isTaboo(n)) w *= 0.5;
-      if (n % 5 === 0) w *= 1.1;
-      w *= 1 + 1.2 * (a.heat10Norm[n] || 0);
-      if (n > 31) w *= 0.4;
-      typical.push(w);
+      var f = a.mainInfo[n];
+      var s = a.signals[n];
+      typical.push(1 + 2 * f.sim + 1.5 * s.trendScore);
     }
     var scores = [];
     for (var t = 0; t < 350; t++) scores.push(combinationRaw(weightedSample(pool, typical, k, rng), a));
@@ -690,136 +757,47 @@
     var nums = set.primary;
     var k = nums.length;
     var info = a.mainInfo;
-    var birthday = nums.filter(function (n) { return n <= 31; }).length;
-    var nonBirthday = k - birthday;
-    var lucky = nums.filter(isLucky).length;
-    var taboo = nums.filter(isTaboo).length;
-    var hot = nums.filter(function (n) { return info[n].heat10 >= 0.7; }).length;
-    var highOmit = nums.filter(function (n) { return info[n].omit >= Math.max(5, info[n].avgOmit * 1.5); }).length;
-    var cold = nums.filter(function (n) { return info[n].heat30 <= 0.15; }).length;
-    var consec = consecutivePairs(nums);
-    var tails = sameTails(nums);
-    var repeats = intersection(nums, a.lastMain).length;
+    var signals = a.signals;
+    var hot = 0, cold = 0, repeat = 0, neighbors = 0, diagonals = 0, gaps = 0, hotTails = 0;
+    for (var i = 0; i < nums.length; i++) {
+      var n = nums[i];
+      var f = info[n];
+      var s = signals[n];
+      if (f.heat10 >= 0.7) hot += 1;
+      if (f.omit >= Math.max(5, f.avgOmit * 1.5)) cold += 1;
+      if (s.repeat) repeat += 1;
+      if (s.neighbor) neighbors += 1;
+      if (s.diagonal) diagonals += 1;
+      if (s.gap5) gaps += 1;
+      if (s.tailHeat >= 0.75) hotTails += 1;
+    }
     var odd = nums.filter(function (n) { return n % 2; }).length;
     var big = nums.filter(function (n) { return n > a.bigCut; }).length;
     var zones = zoneCounts(nums, a.zoneCuts);
     var zoneMax = Math.max.apply(null, zones);
+    var emptyZones = zones.filter(function (z) { return z === 0; }).length;
     var total = sum(nums);
+    var sumZ = Math.abs(total - a.meanSum) / (a.stdSum || 1);
     var span = nums[nums.length - 1] - nums[0];
-    var idealZone = k / zones.length;
-    var balanced = Math.abs(odd - k / 2) < 0.5 && Math.abs(big - k / 2) < 0.5 &&
-      zones.every(function (z) { return Math.abs(z - idealZone) < 0.5; });
-    var risk = set.risk;
-    var anti = set.anti;
-
-    function sameTails(arr) {
-      var c = 0;
-      for (var i = 0; i < arr.length; i++) {
-        for (var j = i + 1; j < arr.length; j++) if (arr[i] % 10 === arr[j] % 10) c += 1;
-      }
-      return c;
-    }
+    var consec = consecutivePairs(nums);
+    var tails = sameTailPairs(nums);
+    var fullSpan = a.game.mainMax - a.game.mainMin;
 
     return [
-      {
-        name: "生日效应",
-        bias: "彩民偏爱 1-31 的生日、纪念日号码，32+ 常被忽略。",
-        current: "生日号 <b>" + birthday + "</b> 个，非生日号 <b>" + nonBirthday + "</b> 个。",
-        action: "反选：至少保留 1 个 32+ 号码。",
-        ok: nonBirthday >= 1,
-      },
-      {
-        name: "吉利数字偏好",
-        bias: "6、8、9、16、18、28 被视为吉利号，选的人更多。",
-        current: "本注含吉利号 <b>" + lucky + "</b> 个。",
-        action: "反选：吉利号不超过 1 个。",
-        ok: lucky <= 1,
-      },
-      {
-        name: "忌讳数字回避",
-        bias: "尾数 4（4/14/24/34）被不少彩民刻意避开。",
-        current: "本注含尾 4 号码 <b>" + taboo + "</b> 个。",
-        action: "反选：至少纳入 1 个尾 4 号码。",
-        ok: taboo >= 1,
-      },
-      {
-        name: "热手谬误",
-        bias: "近期频繁开出的号码会被追热，导致选号集中。",
-        current: "本注含近 10 期热号 <b>" + hot + "</b> 个。",
-        action: "反选：热号不超过 1 个。",
-        ok: hot <= 1,
-      },
-      {
-        name: "赌徒谬误",
-        bias: "长期未出的号码被误认为“该出了”，形成冷号追捧。",
-        current: "本注含高遗漏号码 <b>" + highOmit + "</b> 个。",
-        action: "反选：选 1-2 个中高遗漏，不追极端。",
-        ok: highOmit >= 1 && highOmit <= 2,
-      },
-      {
-        name: "连号不可能错觉",
-        bias: "很多彩民认为连号“不可能开”，反而很少选连号。",
-        current: "本注有 <b>" + consec + "</b> 组连号。",
-        action: "反选：保留 1-2 组连号。",
-        ok: consec >= 1 && consec <= 2,
-      },
-      {
-        name: "同尾/规律回避",
-        bias: "同尾、等差、对称等“看起来有规律”的组合常被回避。",
-        current: "本注有 <b>" + tails + "</b> 组同尾。",
-        action: "反选：允许 1 组同尾或规律形态。",
-        ok: tails >= 1,
-      },
-      {
-        name: "均衡形态偏好",
-        bias: "彩民偏爱奇偶 3:3、大小 3:3、三区 2:2:2 的“均匀感”。",
-        current: "奇偶 <b>" + odd + ":" + (k - odd) + "</b>，大小 <b>" + big + ":" + (k - big) +
-          "</b>，三区 <b>" + zones.join(":") + "</b>。",
-        action: "反选：允许偏态分布。",
-        ok: !balanced,
-      },
-      {
-        name: "上期重号回避",
-        bias: "彩民常认为上期号码“不会连续再开”，刻意避开重号。",
-        current: "本注含上期重号 <b>" + repeats + "</b> 个。",
-        action: "反选：保留 1 个上期重号。",
-        ok: repeats >= 1 && repeats <= 2,
-      },
-      {
-        name: "均匀分布偏好",
-        bias: "号码越分散越像“随机”，彩民越愿意选；局部聚集被回避。",
-        current: "最大区间 <b>" + zoneMax + "</b> 个，跨度 <b>" + span + "</b>。",
-        action: "反选：允许局部聚集或大跨度。",
-        ok: zoneMax >= Math.ceil(idealZone) + 1 || span > 0.5 * (a.game.mainMax - a.game.mainMin),
-      },
-      {
-        name: "从众与合买",
-        bias: "热门号会被合买单、推荐单重复选择，撞号概率更高。",
-        current: "模拟撞号风险 <b>" + risk + "/100</b>，反共识度 <b>" + anti + "/100</b>。",
-        action: "反选：优先低共识号码。",
-        ok: risk < 50,
-      },
-      {
-        name: "锚定效应",
-        bias: "彩民容易以上期开奖、生日或某个“感觉号”为锚点组号。",
-        current: "上期重号 <b>" + repeats + "</b> 个，未照搬上期组合。",
-        action: "反选：重号不超过 2 个。",
-        ok: repeats <= 2,
-      },
-      {
-        name: "小数定律",
-        bias: "用最近几期的“规律”过度推断，忽略长期随机性。",
-        current: "使用近 <b>" + a.window + "</b> 期统计，不只看最近 3 期。",
-        action: "反选：以更长窗口的走势为准。",
-        ok: true,
-      },
-      {
-        name: "损失厌恶",
-        bias: "不敢选冷门或偏态号码，宁愿和大家选得差不多。",
-        current: "本注含冷号 <b>" + cold + "</b> 个。",
-        action: "反选：接受至少 1 个冷号。",
-        ok: cold >= 1,
-      },
+      { name: "热号追踪", bias: "看走势图的彩民会追近 10 期热号，越热越敢追。", current: "本注含近10期热号 <b>" + hot + "</b> 个。", action: "反选：热号不超过 1 个。", ok: hot <= 1 },
+      { name: "冷号回补", bias: "长期未出的号码被当作“该回补了”，冷号也有追随者。", current: "本注含高遗漏 <b>" + cold + "</b> 个。", action: "反选：保留 1-2 个，不追极端。", ok: cold >= 1 && cold <= 2 },
+      { name: "上期重号", bias: "走势图派常从上期号码里留 1 个重号。", current: "本注含上期重号 <b>" + repeat + "</b> 个。", action: "反选：0-1 个重号。", ok: repeat <= 1 },
+      { name: "邻号延伸", bias: "上期号码的 ±1 邻号是常见走势选号。", current: "本注含邻号 <b>" + neighbors + "</b> 个。", action: "反选：邻号不超过 1 个。", ok: neighbors <= 1 },
+      { name: "斜连走势", bias: "走势图上 05→06→07 的斜连会被追。", current: "本注含斜连号 <b>" + diagonals + "</b> 个。", action: "反选：斜连 0-1 个。", ok: diagonals <= 1 },
+      { name: "连号形态", bias: "彩民常按“连号该出了/不该出了”选 1 组连号。", current: "本注有 <b>" + consec + "</b> 组连号。", action: "反选：保留 1 组。", ok: consec === 1 },
+      { name: "同尾走势", bias: "同尾号（05/15/25）是走势图常见观察点。", current: "本注有 <b>" + tails + "</b> 组同尾。", action: "反选：允许 0-1 组。", ok: tails <= 1 },
+      { name: "区间轮动", bias: "彩民会根据近期哪个区热，集中选该区。", current: "三区 <b>" + zones.join(":") + "</b>，空区 <b>" + emptyZones + "</b> 个。", action: "反选：允许空区/偏态。", ok: emptyZones >= 1 || zoneMax >= Math.ceil(k / zones.length) + 1 },
+      { name: "和值回归", bias: "彩民倾向选接近近 30 期均值和的组合。", current: "和值 <b>" + total + "</b>，偏离 <b>" + sumZ.toFixed(1) + "σ</b>。", action: "反选：允许偏离均值。", ok: sumZ >= 0.8 },
+      { name: "奇偶均衡", bias: "3:3、2:4 等均衡奇偶是大众偏好。", current: "奇偶 <b>" + odd + ":" + (k - odd) + "</b>。", action: "反选：允许偏态。", ok: Math.abs(odd - k / 2) >= 1 },
+      { name: "大小均衡", bias: "大小号均衡分布是常见组合习惯。", current: "大小 <b>" + big + ":" + (k - big) + "</b>。", action: "反选：允许偏态。", ok: Math.abs(big - k / 2) >= 1 },
+      { name: "空档回补", bias: "走势图上的空档区会被认为“该补了”。", current: "本注含近5期空档 <b>" + gaps + "</b> 个。", action: "反选：保留 1-2 个。", ok: gaps >= 1 && gaps <= 2 },
+      { name: "跨度选择", bias: "彩民常避开极大/极小跨度，偏好中等跨度。", current: "跨度 <b>" + span + "</b>。", action: "反选：允许大/小跨度。", ok: span > fullSpan * 0.55 || span < fullSpan * 0.35 },
+      { name: "热尾轮动", bias: "近期热尾会被追，冷尾被忽略。", current: "本注含热尾 <b>" + hotTails + "</b> 个。", action: "反选：热尾不超过 1 个。", ok: hotTails <= 1 },
     ];
   }
 
@@ -857,7 +835,7 @@
   function tagOf(info) {
     if (!info || !info.tags || !info.tags.length) return "";
     var tags = info.tags;
-    var priority = ["非生日", "尾4", "高遗漏", "冷号", "上期", "热号", "吉利", "生日"];
+    var priority = ["热号", "高遗漏", "重号", "邻号", "斜连", "热区", "热尾", "空档", "非生日", "中性"];
     for (var p = 0; p < priority.length; p++) {
       if (tags.indexOf(priority[p]) >= 0) return priority[p];
     }
@@ -884,10 +862,10 @@
 
   function introHTML() {
     return '<section class="card intro-card">' +
-      '<div class="intro-eyebrow">NEW THINKING · ANTI-CONSENSUS</div>' +
-      "<h2>不猜“会开什么”，反推“彩民会怎么选”</h2>" +
-      "<p>先用走势图统计冷热、遗漏、和值、奇偶与区间，再模拟彩民的生日号、吉利号、热号、均衡偏好等心理偏差，最后刻意反着选一注。目标不是提高中奖率，而是降低“和很多人选到同一注”的概率。</p>" +
-      '<div class="intro-tags"><span>走势图</span><span>彩民心理</span><span>反向选择</span><span>低撞号</span></div>' +
+      '<div class="intro-eyebrow">V2 · TREND CONSENSUS</div>' +
+      "<h2>大多数彩民不是随机选，而是看走势图</h2>" +
+      "<p>本版把生日号降为极小权重，改用走势图彩民的常见习惯：追热、补冷、看遗漏、重号、邻号、斜连、连号、同尾、区间轮动、和值回归和均衡形态。先模拟他们会怎么选，再刻意反着选一注。目标不是提高中奖率，而是降低撞号分摊。</p>" +
+      '<div class="intro-tags"><span>走势策略</span><span>追热补冷</span><span>重邻斜连</span><span>低共识</span></div>' +
       "</section>";
   }
 
@@ -926,11 +904,18 @@
       return ballWithTag(n, spClass, specialInfo[n], two(n));
     }).join("");
 
-    var birthday = set.primary.filter(function (n) { return n <= 31; }).length;
-    var nonBirthday = set.primary.length - birthday;
-    var taboo = set.primary.filter(isTaboo).length;
-    var repeats = intersection(set.primary, a.lastMain).length;
-    var consec = consecutivePairs(set.primary);
+    var hot = 0, cold = 0, repeat = 0, neighbors = 0, diagonals = 0, gaps = 0;
+    for (var fi = 0; fi < set.primary.length; fi++) {
+      var fn = set.primary[fi];
+      var ff = mainInfo[fn];
+      var fs = a.signals[fn];
+      if (ff.heat10 >= 0.7) hot += 1;
+      if (ff.omit >= Math.max(5, ff.avgOmit * 1.5)) cold += 1;
+      if (fs.repeat) repeat += 1;
+      if (fs.neighbor) neighbors += 1;
+      if (fs.diagonal) diagonals += 1;
+      if (fs.gap5) gaps += 1;
+    }
 
     var backup = reco.sets[1];
     var backupBalls = backup.primary.map(function (n) {
@@ -956,16 +941,16 @@
       (specialBalls ? '<div class="final-special"><span class="label">' + escapeHtml(game.specialLabel) + "</span>" + specialBalls + "</div>" : "") +
       "</div>" +
       '<div class="anti-facts">' +
-      "<span>生日号 <b>" + birthday + "</b></span><span>非生日 <b>" + nonBirthday + "</b></span>" +
-      "<span>尾4 <b>" + taboo + "</b></span><span>连号 <b>" + consec + "</b></span>" +
-      "<span>重号 <b>" + repeats + "</b></span>" +
+      "<span>热号 <b>" + hot + "</b></span><span>高遗漏 <b>" + cold + "</b></span>" +
+      "<span>重号 <b>" + repeat + "</b></span><span>邻号 <b>" + neighbors + "</b></span>" +
+      "<span>斜连 <b>" + diagonals + "</b></span><span>空档 <b>" + gaps + "</b></span>" +
       "</div>" +
       '<div class="backup-set"><div class="backup-label"><span>备选一注 · 反共识度 ' + backup.anti + "/100</span>" +
       copyButtonHTML(setText(reco.gameId, backup), "copy-mini") + "</div>" +
       '<div class="balls">' + backupBalls + (backupSpecial ? '<span class="plus">＋</span>' + backupSpecial : "") + "</div></div>" +
       '<div class="rec-foot"><button class="btn btn-primary" type="button" data-action="reshuffle">重新反推</button>' +
       '<div class="auto-line" data-auto-line><span class="dot"></span><span>每 5 分钟重新反推<br><span data-reco-countdown>05:00</span> 后更新</span></div></div>' +
-      '<p class="anti-note">反共识度与撞号风险只衡量“偏离模拟彩民偏好”的程度，不代表中奖概率；每注组合的中奖概率完全相同。</p>' +
+      '<p class="anti-note">反共识度与撞号风险只衡量“偏离模拟走势图彩民共识”的程度，不代表中奖概率；每注组合的中奖概率完全相同。</p>' +
       "</section>";
   }
 
@@ -1061,12 +1046,12 @@
         '<p class="rule-action">' + escapeHtml(r.action) + "</p></div></li>";
     }).join("");
     return '<section class="card rules-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">◎</span>反推依据</div>' +
-      '<span class="badge gray">统计学 × 心理学</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">◎</span>走势图策略</div>' +
+      '<span class="badge gray">v2 · 走势共识</span></div>' +
       '<div class="step-strip">' +
-      "<div class=\"step\"><b>1. 看走势</b>冷热、遗漏、和值、奇偶、区间</div>" +
-      "<div class=\"step\"><b>2. 模拟彩民</b>生日号、吉利号、热号、均衡偏好</div>" +
-      "<div class=\"step\"><b>3. 反着选</b>低共识、偏态、尾4、连号</div></div>" +
+      "<div class=\"step\"><b>1. 读走势</b>热号、冷号、遗漏、区间、和值</div>" +
+      "<div class=\"step\"><b>2. 模拟彩民</b>追热、补冷、重号、邻号、斜连</div>" +
+      "<div class=\"step\"><b>3. 反着选</b>低共识 + 走势空档</div></div>" +
       '<ul class="rules-list">' + list + "</ul></section>";
   }
 
@@ -1103,9 +1088,9 @@
     }
 
     return '<section class="card consensus-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">◉</span>号码共识榜</div>' +
-      '<span class="badge">按共识度从低到高</span></div>' +
-      '<p class="hint-text">数值越低，表示越偏离模拟彩民偏好，越“反共识”；这不是中奖概率，选中号码以红色边框标出。</p>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">◉</span>走势共识榜</div>' +
+      '<span class="badge">低共识 → 高共识</span></div>' +
+      '<p class="hint-text">数值越低，表示越偏离模拟走势图彩民的偏好；这是走势策略共识，不是中奖概率。选中号码以红色边框标出。</p>' +
       '<div class="consensus-grid">' + mainChips + "</div>" +
       (specialChips ? '<div class="consensus-sub">' + escapeHtml(a.game.specialLabel) + "</div><div class=\"consensus-grid\">" + specialChips + "</div>" : "") +
       "</section>";
@@ -1113,13 +1098,19 @@
 
   function aboutHTML() {
     return '<section class="card about-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">反共识 ≠ 预测</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">v2 · 走势共识</span></div>' +
       '<ul class="about-list">' +
       '<li><span class="bullet">1</span><div><b>每注概率相同</b>：双色球/大乐透的每一组号码中奖概率完全一样；反共识不能提高中奖概率，也不能保证“实际会中奖”。</div></li>' +
       '<li><span class="bullet">2</span><div><b>目标只是少分摊</b>：如果中奖，避开大众常用号码，可能减少与其他人同时中奖、分摊奖金的概率。它影响的是“撞号”，不是“中奖”。</div></li>' +
       '<li><span class="bullet">3</span><div><b>返奖率</b>：官方返奖率约 <b>51%</b>（奖金约 50% + 调节基金），不是 40%；浮动奖奖金会按中奖注数分摊，所以“销量高、奖金低”要区分返奖率与分摊。</div></li>' +
       '<li><span class="bullet">4</span><div><b>数据与走势</b>：使用福彩/体彩公开开奖数据，最近 30/100 期统计；走势图只描述过去，不预示未来。</div></li>' +
       "</ul>" +
+      '<div class="optimization">' +
+      '<div class="opt-title">v2 优化日志</div>' +
+      '<div class="opt-row"><b>v1 问题</b>生日号 / 吉利号 / 尾4 权重过高，反选看起来刻意。</div>' +
+      '<div class="opt-row"><b>v2 改动</b>改为走势图策略：热号、冷号、重号、邻号、斜连、连号、同尾、区间、和值、空档；生日号只保留极小权重。</div>' +
+      '<div class="opt-row"><b>下一步</b>根据反馈继续调整各走势策略权重，持续迭代。</div>' +
+      '</div>' +
       '<div class="rate-note">反共识、冷热、遗漏、连号、同尾都不是“必开信号”。走势图可以用来看，但不能用来承诺结果。</div>' +
       '<div class="about-links"><a href="https://www.cwl.gov.cn/" target="_blank" rel="noopener">中国福利彩票</a>' +
       '<a href="https://www.sporttery.cn/" target="_blank" rel="noopener">中国体育彩票</a>' +
