@@ -429,3 +429,20 @@
 .calc-num { font-weight: 700; color: var(--text) !important; }
 .calc-total { font-weight: 700; color: #ff9b92 !important; }
 .calc-table tr.calc-selected .calc-num { color: #fff !important; }
+
+.pattern-card .card-head { margin-bottom: 8px; }
+.pattern-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.pattern-chip {
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.pattern-label { display: block; font-size: 9px; color: var(--muted-2); }
+.pattern-value { display: block; margin-top: 2px; font-size: 14px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.pattern-sub { display: block; margin-top: 1px; font-size: 8.5px; color: var(--muted-2); }
+@media (max-width: 360px) { .pattern-grid { grid-template-columns: minmax(0, 1fr); } }

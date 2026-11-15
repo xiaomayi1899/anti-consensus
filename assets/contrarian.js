@@ -340,14 +340,14 @@
       }
       var zoneHeat = zoneCnt[zone] ? zoneSum[zone] / zoneCnt[zone] : 0;
       var tailHeat = tailCnt[tail] ? tailSum[tail] / tailCnt[tail] : 0;
-      var trend = 0.30 * (heat10Norm[v] || 0) +
-        0.15 * (heat30Norm[v] || 0) +
-        0.18 * (omitNorm[v] || 0) +
-        0.10 * repeat +
-        0.10 * neighbor +
-        0.10 * diagonal +
-        0.04 * zoneHeat +
-        0.03 * tailHeat;
+      var trend = 0.39 * (heat10Norm[v] || 0) +
+        0.18 * (heat30Norm[v] || 0) +
+        0.22 * (omitNorm[v] || 0) +
+        0.04 * repeat +
+        0.04 * neighbor +
+        0.03 * diagonal +
+        0.06 * zoneHeat +
+        0.04 * tailHeat;
       signals[v] = {
         hot10: heat10Norm[v] || 0,
         hot30: heat30Norm[v] || 0,
@@ -377,14 +377,14 @@
       var n = pool[i];
       var s = signals[n];
       var parts = {
-        hot10: 0.30 * s.hot10,
-        hot30: 0.15 * s.hot30,
-        omit: 0.18 * s.omitNorm,
-        repeat: 0.10 * s.repeat,
-        neighbor: 0.10 * s.neighbor,
-        diagonal: 0.10 * s.diagonal,
-        zone: 0.04 * s.zoneHeat,
-        tail: 0.03 * s.tailHeat,
+        hot10: 0.39 * s.hot10,
+        hot30: 0.18 * s.hot30,
+        omit: 0.22 * s.omitNorm,
+        repeat: 0.04 * s.repeat,
+        neighbor: 0.04 * s.neighbor,
+        diagonal: 0.03 * s.diagonal,
+        zone: 0.06 * s.zoneHeat,
+        tail: 0.04 * s.tailHeat,
       };
       var consensus = clamp((parts.hot10 + parts.hot30 + parts.omit + parts.repeat +
         parts.neighbor + parts.diagonal + parts.zone + parts.tail) * 100, 0, 100);
@@ -414,6 +414,130 @@
       };
     }
     return info;
+  }
+
+  /* 形态的历史分布：众数、常见区间（累积 85%）、出现率、均值/标准差 */
+  function histStat(values) {
+    var total = values.length;
+    var counts = {};
+    for (var i = 0; i < total; i++) {
+      var v = values[i];
+      counts[v] = (counts[v] || 0) + 1;
+    }
+    var keys = [];
+    for (var key in counts) if (counts.hasOwnProperty(key)) keys.push(+key);
+    keys.sort(function (x, y) { return x - y; });
+    var prob = {}, mode = keys.length ? keys[0] : 0, maxP = 0;
+    for (var j = 0; j < keys.length; j++) {
+      prob[keys[j]] = total ? counts[keys[j]] / total : 0;
+      if (prob[keys[j]] > maxP) { maxP = prob[keys[j]]; mode = keys[j]; }
+    }
+    /* 以众数为中心向两侧扩展，累积到 85% 得到“历史常见区间” */
+    var acc = maxP, lo = mode, hi = mode;
+    while (acc < 0.85) {
+      var down = prob[lo - 1] || 0, up = prob[hi + 1] || 0;
+      if (!down && !up) break;
+      if (up >= down) { hi += 1; acc += up; } else { lo -= 1; acc += down; }
+    }
+    var atLeastOne = 0;
+    for (var t = 1; t <= 12; t++) atLeastOne += prob[t] || 0;
+    return {
+      sample: total,
+      mean: total ? mean(values) : 0,
+      std: total ? std(values) : 0,
+      mode: mode,
+      maxP: maxP,
+      lo: lo,
+      hi: hi,
+      prob: prob,
+      rate: atLeastOne,
+      values: keys,
+    };
+  }
+
+  /* 该数量在历史分布里的相对概率（0-1，用于组合校准） */
+  function patternFit(stat, value) {
+    var pv = stat.prob[value];
+    if (pv === undefined) {
+      var edge = value > stat.hi ? stat.hi : stat.lo;
+      return Math.max(0, 0.35 / (1 + Math.abs(value - edge) * 2));
+    }
+    return Math.sqrt(pv / (stat.maxP || 1));
+  }
+
+  /* 是否落在历史常见区间内 */
+  function patternCommon(stat, value) {
+    return value >= stat.lo && value <= stat.hi;
+  }
+
+  /* 常见区间外一格仍可接受（用于候选放宽） */
+  function patternNear(stat, value) {
+    return value >= stat.lo - 1 && value <= stat.hi + 1;
+  }
+
+  function patternText(stat) {
+    return "最常见 " + stat.mode + "（" + Math.round((stat.maxP || 0) * 100) + "%）";
+  }
+
+  /* 近 100 期真实形态统计：重号、邻号、斜连、连号、同尾、空档、空区、和值、奇偶、大小、跨度 */
+  function buildPatternStats(draws, game, cuts) {
+    var n = Math.min(100, draws.length);
+    var repeats = [], neighbors = [], diagonals = [], consecs = [], tails = [];
+    var gaps = [], empties = [], sums = [], odds = [], bigs = [], spans = [];
+    for (var i = 0; i < n - 1; i++) {
+      var cur = E.mainNumbers(game, draws[i]);
+      var prev = E.mainNumbers(game, draws[i + 1]);
+      var prev2 = draws[i + 2] ? E.mainNumbers(game, draws[i + 2]) : [];
+      repeats.push(intersection(cur, prev).length);
+      neighbors.push(cur.filter(function (x) { return isNeighborOf(x, prev); }).length);
+      diagonals.push(cur.filter(function (x) { return isDiagonalOf(x, prev, prev2); }).length);
+      consecs.push(consecutivePairs(cur));
+      tails.push(sameTailPairs(cur));
+      if (i + 5 < draws.length) {
+        var prev5 = [];
+        for (var j = i + 1; j <= i + 5; j++) prev5 = prev5.concat(E.mainNumbers(game, draws[j]));
+        gaps.push(cur.filter(function (x) { return prev5.indexOf(x) < 0; }).length);
+      }
+      empties.push(zoneCounts(cur, cuts).filter(function (z) { return z === 0; }).length);
+      sums.push(sum(cur));
+      odds.push(cur.filter(function (x) { return x % 2; }).length);
+      bigs.push(cur.filter(function (x) { return x > bigCut(game); }).length);
+      spans.push(Math.max.apply(null, cur) - Math.min.apply(null, cur));
+    }
+    function m(arr) { return arr.length ? mean(arr) : 0; }
+    function rate(arr, t) {
+      return arr.length ? arr.filter(function (x) { return x >= t; }).length / arr.length : 0;
+    }
+    var stats = {
+      repeat: histStat(repeats),
+      neighbor: histStat(neighbors),
+      diagonal: histStat(diagonals),
+      consec: histStat(consecs),
+      tail: histStat(tails),
+      gap: histStat(gaps),
+      emptyZone: histStat(empties),
+      odd: histStat(odds),
+      big: histStat(bigs),
+      span: histStat(spans),
+    };
+    return {
+      stats: stats,
+      sample: Math.max(0, n - 1),
+      repeatMean: m(repeats),
+      neighborMean: m(neighbors),
+      diagonalMean: m(diagonals),
+      diagonalRate: rate(diagonals, 1),
+      consecMean: m(consecs),
+      consecRate: rate(consecs, 1),
+      tailMean: m(tails),
+      gapMean: m(gaps),
+      emptyZoneMean: m(empties),
+      sumMean: m(sums),
+      sumStd: std(sums),
+      oddMean: m(odds),
+      bigMean: m(bigs),
+      spanMean: m(spans),
+    };
   }
 
   function analyze(gameId, windowSize) {
@@ -459,6 +583,7 @@
 
     var cuts = zoneCuts(game);
     var cutBig = bigCut(game);
+    var patterns = buildPatternStats(draws, game, cuts);
     var formRows = [];
     for (var r = 0; r < Math.min(8, draws.length); r++) {
       var d = draws[r];
@@ -489,7 +614,7 @@
       signals: signals, specialSignals: specialSignals,
       mainInfo: mainInfo, specialInfo: specialInfo,
       sums: sums, meanSum: meanSum, stdSum: stdSum, formRows: formRows,
-      zoneCuts: cuts, bigCut: cutBig,
+      patterns: patterns, zoneCuts: cuts, bigCut: cutBig,
     };
   }
 
@@ -499,6 +624,7 @@
     var k = nums.length;
     var info = a.mainInfo;
     var signals = a.signals;
+    var st = a.patterns.stats;
     var avgConsensus = 0, odd = 0, big = 0;
     var hot = 0, cold = 0, neighbors = 0, diagonals = 0, gaps = 0;
     for (var i = 0; i < nums.length; i++) {
@@ -517,13 +643,14 @@
     avgConsensus /= k;
 
     var zones = zoneCounts(nums, a.zoneCuts);
-    var idealOdd = k / 2, idealBig = k / 2, idealZone = k / zones.length;
+    var idealZone = k / zones.length;
     var zoneDev = 0;
     for (var z = 0; z < zones.length; z++) zoneDev += Math.abs(zones[z] - idealZone);
     var sumZ = Math.abs(sum(nums) - a.meanSum) / (a.stdSum || 1);
     var repeat = intersection(nums, a.lastMain).length;
     var consec = consecutivePairs(nums);
     var tails = sameTailPairs(nums);
+    var span = nums[nums.length - 1] - nums[0];
     var emptyZones = 0;
     for (var e = 0; e < zones.length; e++) if (zones[e] === 0) emptyZones += 1;
 
@@ -538,58 +665,114 @@
     if (isArithmetic(nums)) penalty += 8;
     if (maxRun(nums) >= 4) penalty += 6;
 
+    /* 形态项统一写成“偏离历史分布的罚分”：越贴近近 100 期真实分布罚分越低。
+       斜连 0 个（68%）与 1 个（29%）都只是不同程度的贴近，不会被系统排除。 */
+    function miss(stat, value, weight) { return weight * (1 - patternFit(stat, value)); }
+
     return 0.42 * avgConsensus +
-      12 * Math.exp(-sumZ * sumZ / 2) +
-      10 * clamp(1 - Math.abs(odd - idealOdd) / k, 0, 1) +
-      8 * clamp(1 - Math.abs(big - idealBig) / k, 0, 1) +
-      10 * clamp(1 - zoneDev / k, 0, 1) +
-      12 * Math.exp(-Math.pow(repeat - 1, 2)) +
-      8 * Math.exp(-Math.pow(neighbors - 1, 2)) +
-      8 * Math.exp(-Math.pow(diagonals - 1, 2)) +
-      5 * Math.exp(-Math.pow(hot - 2, 2)) +
-      5 * Math.exp(-Math.pow(cold - 1, 2)) +
-      4 * Math.exp(-Math.pow(gaps - 1, 2)) +
-      4 * Math.exp(-Math.pow(consec - 1, 2)) +
-      3 * Math.exp(-Math.pow(tails - 1, 2)) -
-      10 * emptyZones +
+      miss(st.repeat, repeat, 14) +
+      miss(st.neighbor, neighbors, 12) +
+      miss(st.diagonal, diagonals, 8) +
+      miss(st.consec, consec, 6) +
+      miss(st.tail, tails, 4) +
+      miss(st.gap, gaps, 5) +
+      miss(st.emptyZone, emptyZones, 3) +
+      miss(st.odd, odd, 2) +
+      miss(st.big, big, 2) +
+      12 * (1 - Math.exp(-sumZ * sumZ / 2)) +
+      10 * zoneDev / k +
+      4 * (1 - Math.exp(-0.5 * Math.pow((span - st.span.mean) / (st.span.std || 1), 2))) +
+      (hot > 2 ? (hot - 2) * 4 : 0) +
+      (cold === 0 ? 2 : 0) +
       (cold > 2 ? (cold - 2) * 8 : 0) +
-      (neighbors > 2 ? (neighbors - 2) * 6 : 0) +
-      (gaps > 2 ? (gaps - 2) * 4 : 0) +
       penalty;
   }
 
-  function buildCandidates(a) {
-    var pool = a.mainPool;
-    var k = a.game.mainCount;
-    var sorted = pool.slice().sort(function (x, y) {
+  /* 反共识候选池：共识分最低的一批 + 重号/邻号/斜连各留配额，
+     避免常见形态的号码被整体挤出候选池（这正是 v4 里“重号 0 邻号 0 斜连 0”的成因）。 */
+  function candidatePool(a) {
+    var sorted = a.mainPool.slice().sort(function (x, y) {
       return a.mainInfo[x].consensus - a.mainInfo[y].consensus || x - y;
     });
-    var top = sorted.slice(0, Math.min(16, sorted.length));
+    var base = sorted.slice(0, Math.min(16, sorted.length));
+    var extra = [];
+    function addBy(test, count) {
+      var added = 0;
+      for (var i = 0; i < sorted.length && added < count; i++) {
+        var n = sorted[i];
+        if (base.indexOf(n) >= 0 || extra.indexOf(n) >= 0) continue;
+        if (!test(n)) continue;
+        extra.push(n);
+        added += 1;
+      }
+    }
+    addBy(function (n) { return a.signals[n].repeat; }, 3);
+    addBy(function (n) { return a.signals[n].neighbor; }, 3);
+    addBy(function (n) { return a.signals[n].diagonal; }, 2);
+    var pool = base.concat(extra);
+    for (var j = 0; j < sorted.length && pool.length < 24; j++) {
+      if (pool.indexOf(sorted[j]) < 0) pool.push(sorted[j]);
+    }
+    return pool;
+  }
+
+  function buildCandidates(a) {
+    var k = a.game.mainCount;
+    var top = candidatePool(a);
     var lastKey = a.lastMain.slice().sort(function (x, y) { return x - y; }).join(",");
     var out = [], chosen = [];
+    var st = a.patterns.stats;
 
-    function rec(start) {
+    /* 形态数量是否落在历史常见区间：默认按累积 85% 区间判断，
+       放宽容错时允许区间外一格。斜连 0 个或 1 个都能通过——不预设“必须有几个”。 */
+    function patternOk(nums, relax) {
+      var repeat = intersection(nums, a.lastMain).length;
+      var neighbors = nums.filter(function (n) { return a.signals[n].neighbor; }).length;
+      var diagonals = nums.filter(function (n) { return a.signals[n].diagonal; }).length;
+      var consec = consecutivePairs(nums);
+      var tails = sameTailPairs(nums);
+      var gaps = nums.filter(function (n) { return a.signals[n].gap5; }).length;
+      var zones = zoneCounts(nums, a.zoneCuts);
+      var emptyZones = zones.filter(function (z) { return z === 0; }).length;
+      var odd = nums.filter(function (n) { return n % 2; }).length;
+      var big = nums.filter(function (n) { return n > a.bigCut; }).length;
+      var span = nums[nums.length - 1] - nums[0];
+      var checks = [
+        [st.repeat, repeat], [st.neighbor, neighbors], [st.diagonal, diagonals],
+        [st.consec, consec], [st.tail, tails], [st.gap, gaps],
+        [st.emptyZone, emptyZones], [st.odd, odd], [st.big, big],
+      ];
+      for (var c = 0; c < checks.length; c++) {
+        var stat = checks[c][0], val = checks[c][1];
+        if (relax ? !patternNear(stat, val) : !patternCommon(stat, val)) return false;
+      }
+      return Math.abs(span - st.span.mean) <= (relax ? 8 : 5);
+    }
+
+    function rec(start, relax) {
       if (chosen.length === k) {
         var nums = chosen.slice().sort(function (x, y) { return x - y; });
         var key = nums.join(",");
         if (key === lastKey) return;
+        if (!patternOk(nums, relax)) return;
         out.push({ nums: nums, key: key, raw: combinationRaw(nums, a) });
         return;
       }
       for (var i = start; i < top.length; i++) {
         if (top.length - i < k - chosen.length) break;
         chosen.push(top[i]);
-        rec(i + 1);
+        rec(i + 1, relax);
         chosen.pop();
       }
     }
-    rec(0);
+    rec(0, false);
+    if (!out.length) rec(0, true);
     out.sort(function (x, y) {
       return x.raw - y.raw || x.key.localeCompare(y.key);
     });
     if (!out.length) {
       var fallback = top.slice(0, k).sort(function (x, y) { return x - y; });
-      out.push({ nums: fallback, key: fallback.join(","), raw: combinationRaw(fallback, a) });
+      out.push({ nums: fallback, key: fallback.join(","), raw: combinationRaw(fallback, a), fallback: true });
     }
     return out;
   }
@@ -617,6 +800,7 @@
       anti: clamp(Math.round(100 - avg), 0, 100),
       avg: Math.round(avg * 10) / 10,
       raw: final.raw,
+      fit: Math.round(clamp(100 - final.raw, 0, 100) * 10) / 10,
     };
     return {
       sets: [set],
@@ -652,6 +836,7 @@
     var k = nums.length;
     var info = a.mainInfo;
     var signals = a.signals;
+    var p = a.patterns;
     var hot = 0, cold = 0, repeat = 0, neighbors = 0, diagonals = 0, gaps = 0, hotTails = 0;
     for (var i = 0; i < nums.length; i++) {
       var n = nums[i];
@@ -668,31 +853,64 @@
     var odd = nums.filter(function (n) { return n % 2; }).length;
     var big = nums.filter(function (n) { return n > a.bigCut; }).length;
     var zones = zoneCounts(nums, a.zoneCuts);
-    var zoneMax = Math.max.apply(null, zones);
     var emptyZones = zones.filter(function (z) { return z === 0; }).length;
     var total = sum(nums);
     var sumZ = Math.abs(total - a.meanSum) / (a.stdSum || 1);
     var span = nums[nums.length - 1] - nums[0];
     var consec = consecutivePairs(nums);
     var tails = sameTailPairs(nums);
-    var fullSpan = a.game.mainMax - a.game.mainMin;
+    var st = p.stats;
+    function pct(x) { return Math.round((x || 0) * 100) + "%"; }
+    function distText(stat, unit) {
+      return "近100期最常见 " + stat.mode + " " + unit + "（" + pct(stat.maxP) +
+        "），常见区间 " + stat.lo + "-" + stat.hi + " " + unit + "。";
+    }
 
     return [
-      { name: "热号追踪", bias: "看走势图的彩民会追近 10 期热号，越热越敢追。", current: "本注含近10期热号 <b>" + hot + "</b> 个。", action: "反选：热号不超过 1 个。", ok: hot <= 1 },
-      { name: "冷号回补", bias: "长期未出的号码被当作“该回补了”，冷号也有追随者。", current: "本注含高遗漏 <b>" + cold + "</b> 个。", action: "反选：保留 1-2 个，不追极端。", ok: cold >= 1 && cold <= 2 },
-      { name: "上期重号", bias: "走势图派常从上期号码里留 1 个重号。", current: "本注含上期重号 <b>" + repeat + "</b> 个。", action: "反选：0-1 个重号。", ok: repeat <= 1 },
-      { name: "邻号延伸", bias: "上期号码的 ±1 邻号是常见走势选号。", current: "本注含邻号 <b>" + neighbors + "</b> 个。", action: "反选：邻号不超过 1 个。", ok: neighbors <= 1 },
-      { name: "斜连走势", bias: "走势图上 05→06→07 的斜连会被追。", current: "本注含斜连号 <b>" + diagonals + "</b> 个。", action: "反选：斜连 0-1 个。", ok: diagonals <= 1 },
-      { name: "连号形态", bias: "彩民常按“连号该出了/不该出了”选 1 组连号。", current: "本注有 <b>" + consec + "</b> 组连号。", action: "反选：保留 1 组。", ok: consec === 1 },
-      { name: "同尾走势", bias: "同尾号（05/15/25）是走势图常见观察点。", current: "本注有 <b>" + tails + "</b> 组同尾。", action: "反选：允许 0-1 组。", ok: tails <= 1 },
-      { name: "区间轮动", bias: "彩民会根据近期哪个区热，集中选该区。", current: "三区 <b>" + zones.join(":") + "</b>，空区 <b>" + emptyZones + "</b> 个。", action: "反选：允许空区/偏态。", ok: emptyZones >= 1 || zoneMax >= Math.ceil(k / zones.length) + 1 },
-      { name: "和值回归", bias: "彩民倾向选接近近 30 期均值和的组合。", current: "和值 <b>" + total + "</b>，偏离 <b>" + sumZ.toFixed(1) + "σ</b>。", action: "反选：允许偏离均值。", ok: sumZ >= 0.8 },
-      { name: "奇偶均衡", bias: "3:3、2:4 等均衡奇偶是大众偏好。", current: "奇偶 <b>" + odd + ":" + (k - odd) + "</b>。", action: "反选：允许偏态。", ok: Math.abs(odd - k / 2) >= 1 },
-      { name: "大小均衡", bias: "大小号均衡分布是常见组合习惯。", current: "大小 <b>" + big + ":" + (k - big) + "</b>。", action: "反选：允许偏态。", ok: Math.abs(big - k / 2) >= 1 },
-      { name: "空档回补", bias: "走势图上的空档区会被认为“该补了”。", current: "本注含近5期空档 <b>" + gaps + "</b> 个。", action: "反选：保留 1-2 个。", ok: gaps >= 1 && gaps <= 2 },
-      { name: "跨度选择", bias: "彩民常避开极大/极小跨度，偏好中等跨度。", current: "跨度 <b>" + span + "</b>。", action: "反选：允许大/小跨度。", ok: span > fullSpan * 0.55 || span < fullSpan * 0.35 },
-      { name: "热尾轮动", bias: "近期热尾会被追，冷尾被忽略。", current: "本注含热尾 <b>" + hotTails + "</b> 个。", action: "反选：热尾不超过 1 个。", ok: hotTails <= 1 },
+      { name: "热号追踪", bias: "彩民会追近 10 期热号，但不代表热号一定继续出。", current: "本注含近10期热号 <b>" + hot + "</b> 个。", action: "控制：热号不超过 1 个，降低撞热号。", ok: hot <= 1 },
+      { name: "冷号回补", bias: "长期未出会被认为“该补了”，但极端冷号并不更稳。", current: "本注含高遗漏 <b>" + cold + "</b> 个。", action: "校准：保留 1-2 个中高遗漏，不追极端。", ok: cold >= 1 && cold <= 2 },
+      { name: "上期重号", bias: "重号是高频形态：" + distText(st.repeat, "个"), current: "本注 <b>" + repeat + "</b> 个。", action: "校准：落在历史常见区间即可，不刻意凑也不刻意躲。", ok: patternCommon(st.repeat, repeat) },
+      { name: "邻号延伸", bias: "上期号码的 ±1 邻号几乎每期都有：" + pct(st.neighbor.rate) + " 的期次至少 1 个。" + distText(st.neighbor, "个"), current: "本注 <b>" + neighbors + "</b> 个。", action: "校准：按历史分布保留邻号，不把它当“要回避的形态”。", ok: patternCommon(st.neighbor, neighbors) },
+      { name: "斜连走势", bias: "斜连经常出现：" + pct(st.diagonal.rate) + " 的期次至少 1 个；0 个同样常见（" + pct(st.diagonal.prob[0] || 0) + "）。" + distText(st.diagonal, "个"), current: "本注 <b>" + diagonals + "</b> 个。", action: "校准：0 个或 1 个都算正常，由其他维度决定，不预设必须含斜连。", ok: patternCommon(st.diagonal, diagonals) },
+      { name: "连号形态", bias: "连号是常见形态：" + pct(st.consec.rate) + " 的期次至少 1 组。" + distText(st.consec, "组"), current: "本注 <b>" + consec + "</b> 组。", action: "校准：落在历史常见区间即可，不认为连号不会出。", ok: patternCommon(st.consec, consec) },
+      { name: "同尾走势", bias: "同尾号也会出现：" + pct(st.tail.rate) + " 的期次至少 1 组。" + distText(st.tail, "组"), current: "本注 <b>" + tails + "</b> 组。", action: "校准：按历史分布取数量，不刻意回避同尾。", ok: patternCommon(st.tail, tails) },
+      { name: "区间轮动", bias: "空区并不罕见：" + pct(st.emptyZone.prob[1] || 0) + " 的期次有 1 个空区。" + distText(st.emptyZone, "个"), current: "三区 <b>" + zones.join(":") + "</b>，空区 <b>" + emptyZones + "</b> 个。", action: "校准：空区数量贴近历史分布。", ok: patternCommon(st.emptyZone, emptyZones) },
+      { name: "和值回归", bias: "和值围绕历史均值波动；近100期均值 " + p.sumMean.toFixed(0) + "±" + p.sumStd.toFixed(0) + "。", current: "和值 <b>" + total + "</b>；偏离 <b>" + sumZ.toFixed(1) + "σ</b>。", action: "校准：控制在与历史分布相近的范围。", ok: sumZ <= 1.5 },
+      { name: "奇偶均衡", bias: "奇偶比例有历史分布：" + distText(st.odd, "个奇数"), current: "奇偶 <b>" + odd + ":" + (k - odd) + "</b>，奇数 <b>" + odd + "</b> 个。", action: "校准：允许偏态，但落在历史常见区间。", ok: patternCommon(st.odd, odd) },
+      { name: "大小均衡", bias: "大小号比例也有历史分布：" + distText(st.big, "个大号"), current: "大小 <b>" + big + ":" + (k - big) + "</b>，大号 <b>" + big + "</b> 个。", action: "校准：允许偏态，但落在历史常见区间。", ok: patternCommon(st.big, big) },
+      { name: "空档回补", bias: "近5期没开过的“空档号”也会开出：" + distText(st.gap, "个"), current: "本注含近5期空档 <b>" + gaps + "</b> 个。", action: "校准：按历史空档数量调整。", ok: patternCommon(st.gap, gaps) },
+      { name: "跨度选择", bias: "跨度有历史分布；近100期均值 " + st.span.mean.toFixed(1) + "，波动 ±" + st.span.std.toFixed(1) + "。", current: "跨度 <b>" + span + "</b>。", action: "校准：允许大/小跨度，但靠近历史均值。", ok: Math.abs(span - st.span.mean) <= (st.span.std || 1) * 1.5 },
+      { name: "热尾轮动", bias: "近期热尾会被追，但热尾不等于必出。", current: "本注含热尾 <b>" + hotTails + "</b> 个。", action: "控制：热尾不超过 1 个，降低撞热尾。", ok: hotTails <= 1 },
     ];
+  }
+
+  function patternHTML(a) {
+    var p = a.patterns;
+    var st = p.stats;
+    function chip(label, value, sub) {
+      return '<div class="pattern-chip"><span class="pattern-label">' + escapeHtml(label) +
+        '</span><span class="pattern-value">' + escapeHtml(value) + "</span>" +
+        (sub ? '<span class="pattern-sub">' + escapeHtml(sub) + "</span>" : "") + "</div>";
+    }
+    function pct(x) { return Math.round((x || 0) * 100) + "%"; }
+    function range(stat) { return "常见 " + stat.lo + "-" + stat.hi + "｜率 " + pct(stat.rate); }
+    return '<section class="card pattern-card">' +
+      '<div class="card-head"><div class="card-title"><span class="icon">▤</span>历史形态校准</div>' +
+      '<span class="badge">近 ' + p.sample + " 期</span></div>" +
+      '<p class="hint-text">斜连、邻号、重号、连号本身就经常出现，所以不反选、也不硬凑：先统计它们近 100 期的真实分布，再让组合的数量落在历史常见区间，由其他维度决定具体号码。</p>' +
+      '<div class="pattern-grid">' +
+      chip("重号", "均值 " + st.repeat.mean.toFixed(1) + " 个", "最常见 " + st.repeat.mode + "｜" + range(st.repeat)) +
+      chip("邻号", "均值 " + st.neighbor.mean.toFixed(1) + " 个", "最常见 " + st.neighbor.mode + "｜" + range(st.neighbor)) +
+      chip("斜连", "均值 " + st.diagonal.mean.toFixed(1) + " 个", "0 个 " + pct(st.diagonal.prob[0] || 0) + "｜1 个 " + pct(st.diagonal.prob[1] || 0)) +
+      chip("连号", "均值 " + st.consec.mean.toFixed(1) + " 组", "最常见 " + st.consec.mode + "｜" + range(st.consec)) +
+      chip("同尾", "均值 " + st.tail.mean.toFixed(1) + " 组", "最常见 " + st.tail.mode + "｜" + range(st.tail)) +
+      chip("空档", "均值 " + st.gap.mean.toFixed(1) + " 个", "最常见 " + st.gap.mode + "｜" + range(st.gap)) +
+      chip("空区", "均值 " + st.emptyZone.mean.toFixed(1) + " 个", "最常见 " + st.emptyZone.mode + "｜" + range(st.emptyZone)) +
+      chip("和值", "均值 " + p.sumMean.toFixed(0) + " ± " + p.sumStd.toFixed(0), "近100期") +
+      chip("奇数", "均值 " + st.odd.mean.toFixed(1) + " 个", "最常见 " + st.odd.mode + "｜" + range(st.odd)) +
+      chip("大号", "均值 " + st.big.mean.toFixed(1) + " 个", "最常见 " + st.big.mode + "｜" + range(st.big)) +
+      chip("跨度", "均值 " + st.span.mean.toFixed(1), "波动 ±" + st.span.std.toFixed(1)) +
+      "</div></section>";
   }
 
   /* ---------------- 渲染 ---------------- */
@@ -756,10 +974,10 @@
 
   function introHTML() {
     return '<section class="card intro-card">' +
-      '<div class="intro-eyebrow">V3 · FIXED CALC</div>' +
-      "<h2>每个号码单独计算，固定一注</h2>" +
-      "<p>先按走势图给每个号码逐项打分：热号、近30热度、遗漏、重号、邻号、斜连、区间、尾数；再把共识分最低的 16 个号码枚举所有组合，按组合得分排序，固定选出第一注。不使用随机数，点击页面不会换号；只有新开奖数据或切换统计窗口才会重算。</p>" +
-      '<div class="intro-tags"><span>逐号计算</span><span>确定性</span><span>固定一注</span><span>低共识</span></div>' +
+      '<div class="intro-eyebrow">V4 · SHAPE CALIBRATION</div>' +
+      "<h2>先看历史形态，再固定一注</h2>" +
+      "<p>不再把斜连、邻号、重号当成“不可能”。先统计近 100 期这些形态的真实出现率，再给每个号码逐项打分，组合按历史分布校准，最后确定性枚举、固定一注。仍不使用随机数；刷新页面不会换号，只有新开奖数据或切换统计窗口才重算。</p>" +
+      '<div class="intro-tags"><span>历史校准</span><span>逐号计算</span><span>固定一注</span><span>低共识</span></div>' +
       "</section>";
   }
 
@@ -820,8 +1038,8 @@
       '<div class="anti-metrics">' +
       '<div><div class="metric-head"><span>平均共识分</span><b>' + set.avg + "/100</b></div>" +
       '<div class="metric-bar risk"><i style="width:' + Math.round(set.avg) + '%"></i></div></div>' +
-      '<div><div class="metric-head"><span>组合计算得分</span><b>' + set.raw.toFixed(1) + "</b></div>" +
-      '<div class="metric-bar"><i style="width:' + Math.min(100, Math.max(0, set.raw)) + '%"></i></div></div>' +
+      '<div><div class="metric-head"><span>历史贴合度</span><b>' + set.fit.toFixed(1) + "</b></div>" +
+      '<div class="metric-bar"><i style="width:' + Math.min(100, Math.max(0, set.fit)) + '%"></i></div></div>' +
       "</div></div>" +
       '<div class="final-balls"><div class="balls">' + mainBalls + "</div>" +
       (specialBalls ? '<div class="final-special"><span class="label">' + escapeHtml(game.specialLabel) + "</span>" + specialBalls + "</div>" : "") +
@@ -870,8 +1088,8 @@
     var html = '<section class="card calc-card">' +
       '<div class="card-head"><div class="card-title"><span class="icon">∑</span>逐号计算明细</div>' +
       '<span class="badge">确定性 · 无随机</span></div>' +
-      '<p class="hint-text">每个号码先单独计算共识分；分数越低越反共识。最终一注从共识分最低的 16 个号码中枚举所有组合，按组合得分从低到高排序取第一注，不使用随机数。</p>' +
-      '<div class="formula-line">共识分 = 100 × (0.30×热10 + 0.15×热30 + 0.18×遗漏 + 0.10×重号 + 0.10×邻号 + 0.10×斜连 + 0.04×区间 + 0.03×尾数)</div>' +
+      '<p class="hint-text">每个号码先单独计算共识分；分数越低越反共识。候选池 = 共识分最低的 16 个号码 + 重号/邻号/斜连配额 8 个（不让常见形态整体挤出），枚举所有组合后按“共识分 + 历史形态分布校准”排序取第一注，不使用随机数。</p>' +
+      '<div class="formula-line">共识分 = 100 × (0.39×热10 + 0.18×热30 + 0.22×遗漏 + 0.04×重号 + 0.04×邻号 + 0.03×斜连 + 0.06×区间 + 0.04×尾数)</div>' +
       calcTableHTML(a.game.mainLabel, a.mainPool, a.mainInfo, a.signals, set.primary);
     if (a.specialInfo) {
       html += calcTableHTML(a.game.specialLabel, a.specialPool, a.specialInfo, a.specialSignals, set.special);
@@ -966,18 +1184,18 @@
     var list = rules.map(function (r, i) {
       return '<li class="rule-item"><span class="rule-index">' + (i + 1) + "</span>" +
         '<div class="rule-body"><div class="rule-head"><b>' + escapeHtml(r.name) + "</b>" +
-        '<span class="' + (r.ok ? "rule-ok" : "rule-warn") + '">' + (r.ok ? "✓ 已反选" : "· 仍偏大众") + "</span></div>" +
+        '<span class="' + (r.ok ? "rule-ok" : "rule-warn") + '">' + (r.ok ? "✓ 校准" : "· 偏离历史") + "</span></div>" +
         '<p class="rule-bias">' + escapeHtml(r.bias) + "</p>" +
         '<p class="rule-current">' + r.current + "</p>" +
         '<p class="rule-action">' + escapeHtml(r.action) + "</p></div></li>";
     }).join("");
     return '<section class="card rules-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">◎</span>走势图策略</div>' +
-      '<span class="badge gray">v3 · 固定计算</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">◎</span>形态校准</div>' +
+      '<span class="badge gray">v4 · 形态校准</span></div>' +
       '<div class="step-strip">' +
       "<div class=\"step\"><b>1. 读走势</b>热号、冷号、遗漏、区间、和值</div>" +
-      "<div class=\"step\"><b>2. 逐号计算</b>每个号码单独打分</div>" +
-      "<div class=\"step\"><b>3. 固定选号</b>枚举组合，取最低分</div></div>" +
+      "<div class=\"step\"><b>2. 统计形态</b>近100期真实出现率</div>" +
+      "<div class=\"step\"><b>3. 固定选号</b>逐号计算 + 枚举组合</div></div>" +
       '<ul class="rules-list">' + list + "</ul></section>";
   }
 
@@ -1024,7 +1242,7 @@
 
   function aboutHTML() {
     return '<section class="card about-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">v3 · 固定计算</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">v4 · 形态校准</span></div>' +
       '<ul class="about-list">' +
       '<li><span class="bullet">1</span><div><b>每注概率相同</b>：双色球/大乐透的每一组号码中奖概率完全一样；反共识不能提高中奖概率，也不能保证“实际会中奖”。</div></li>' +
       '<li><span class="bullet">2</span><div><b>目标只是少分摊</b>：如果中奖，避开大众常用号码，可能减少与其他人同时中奖、分摊奖金的概率。它影响的是“撞号”，不是“中奖”。</div></li>' +
@@ -1033,10 +1251,12 @@
       '<li><span class="bullet">5</span><div><b>固定一注</b>：每个号码由走势因子逐项加权计算，组合用确定性枚举排序；刷新页面、重复点击不会换号，只有新开奖数据或切换统计窗口才重算。</div></li>' +
       "</ul>" +
       '<div class="optimization">' +
-      '<div class="opt-title">v3 优化日志</div>' +
+      '<div class="opt-title">v4 优化日志</div>' +
       '<div class="opt-row"><b>v1 问题</b>生日号 / 吉利号 / 尾4 权重过高，反选看起来刻意。</div>' +
       '<div class="opt-row"><b>v2 问题</b>改为走势图策略，但仍使用随机模拟和重新抽号，点击就换号。</div>' +
-      '<div class="opt-row"><b>v3 改动</b>去掉随机模拟与重新抽号；每个号码单独加权计算共识分，组合用确定性枚举排序，固定一注。</div>' +
+      '<div class="opt-row"><b>v3 问题</b>虽然固定一注，但仍把斜连/邻号/重号等常见形态当作“要回避”，逻辑不够贴近真实走势。</div>' +
+      '<div class="opt-row"><b>v4 改动</b>统计近100期重号/邻号/斜连/连号/同尾/空档/空区/和值/奇偶/大小/跨度真实分布，组合评分按历史分布校准；斜连/邻号不再被当作“不可能”。</div>' +
+      '<div class="opt-row"><b>v4 修正</b>形态不再“越接近 1 越好”：重号/邻号/斜连的逐号权重降到 0.04/0.04/0.03，不再把这类号码整体挤出候选池；候选池额外保留形态配额，形态数量只看是否落在历史常见区间（斜连 0 个或 1 个都正常）。</div>' +
       '<div class="opt-row"><b>下一步</b>根据反馈调整各走势因子的权重，持续迭代。</div>' +
       '</div>' +
       '<div class="rate-note">反共识、冷热、遗漏、连号、同尾都不是“必开信号”。走势图可以用来看，但不能用来承诺结果。</div>' +
@@ -1064,7 +1284,7 @@
       ? '<div class="notice"><span class="n-dot"></span><span>网络暂时不可用，正在显示本地缓存。网络恢复后会自动同步。</span></div>'
       : "";
     dom.main.innerHTML = notice + introHTML() + latestHTML(a) + finalHTML(reco) + calcHTML(reco) +
-      trendHTML(a) + rulesHTML(reco) + consensusHTML(reco) + aboutHTML();
+      trendHTML(a) + patternHTML(a) + rulesHTML(reco) + consensusHTML(reco) + aboutHTML();
     tick();
   }
 
