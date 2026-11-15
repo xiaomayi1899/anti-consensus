@@ -1,5 +1,5 @@
 /* 反共识选号 Service Worker：应用壳离线可用，开奖数据网络优先 */
-const VERSION = "2026.11.15.2";
+const VERSION = "2026.11.15.3";
 const SHELL_CACHE = `anti-shell-${VERSION}`;
 const DATA_CACHE = `anti-data-${VERSION}`;
 

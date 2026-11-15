@@ -19,7 +19,6 @@
   // Netlify 等静态托管时，后台尝试从旧站读取最新数据；失败则继续用打包数据
   var LIVE_DATA_URL = "https://xiaomayi1899.github.io/lucky-numbers/data/lottery.json";
   var REFRESH_MS = 60 * 1000;
-  var RECO_MS = 5 * 60 * 1000;
   var LS_DATA = "anti.lottery.cache.v1";
   var LS_GAME = "anti.contrarian.game.v1";
   var LS_WINDOW = "anti.contrarian.window.v1";
@@ -35,7 +34,6 @@
     nextFetch: 0,
     online: null,
     fetching: false,
-    lastRecoRender: 0,
   };
 
   var dom = {};
@@ -76,34 +74,6 @@
       out[pool[j]] = span > 1e-12 ? (val - min) / span : 0.5;
     }
     return out;
-  }
-  function shuffle(arr, rng) {
-    var a = arr.slice();
-    for (var i = a.length - 1; i > 0; i--) {
-      var j = Math.floor(rng() * (i + 1));
-      var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
-    }
-    return a;
-  }
-  function weightedSample(pool, weights, k, rng) {
-    var items = [];
-    for (var i = 0; i < pool.length; i++) items.push({ n: pool[i], w: Math.max(0.0001, weights[i] || 1) });
-    var picked = [];
-    var take = Math.min(k, items.length);
-    for (var j = 0; j < take; j++) {
-      var total = 0;
-      for (var a = 0; a < items.length; a++) total += items[a].w;
-      var r = rng() * total;
-      var idx = 0;
-      for (; idx < items.length; idx++) {
-        r -= items[idx].w;
-        if (r <= 0) break;
-      }
-      if (idx >= items.length) idx = items.length - 1;
-      picked.push(items[idx].n);
-      items.splice(idx, 1);
-    }
-    return picked.sort(function (x, y) { return x - y; });
   }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -377,8 +347,7 @@
         0.10 * neighbor +
         0.10 * diagonal +
         0.04 * zoneHeat +
-        0.03 * tailHeat +
-        (v <= 31 ? 0.015 : 0);
+        0.03 * tailHeat;
       signals[v] = {
         hot10: heat10Norm[v] || 0,
         hot30: heat30Norm[v] || 0,
@@ -396,49 +365,30 @@
   }
 
   /* 模拟 2000 个“看走势图选号”的彩民：追热、补冷、重号、邻号、斜连、区间、尾数、均衡 */
-  function simulatePunters(pool, k, signals, rng) {
-    var styles = [
-      { w: 24, f: function (s) { return 0.1 + 2 * s.hot10 + 0.4 * s.hot30; } },
-      { w: 18, f: function (s) { return 0.1 + 2 * s.omitNorm + 0.5 * s.gap5; } },
-      { w: 12, f: function (s) { return 0.1 + 3 * s.repeat + 0.2 * s.hot10; } },
-      { w: 12, f: function (s) { return 0.1 + 3 * s.neighbor + 0.2 * s.hot10; } },
-      { w: 10, f: function (s) { return 0.1 + 3 * s.diagonal + 0.2 * s.hot10; } },
-      { w: 10, f: function (s) { return 0.1 + 2 * s.zoneHeat + 0.3 * s.hot10; } },
-      { w: 7, f: function (s) { return 0.1 + 2 * s.tailHeat + 0.3 * s.hot10; } },
-      { w: 7, f: function (s) { return 0.1 + 0.8 * s.hot30 + 0.6 * s.omitNorm + 0.2; } },
-    ];
-    var total = 0;
-    for (var si = 0; si < styles.length; si++) total += styles[si].w;
-    var counts = zeroMap(pool);
-    for (var t = 0; t < 2000; t++) {
-      var r = rng() * total, acc = 0, idx = 0;
-      for (; idx < styles.length; idx++) {
-        acc += styles[idx].w;
-        if (r <= acc) break;
-      }
-      if (idx >= styles.length) idx = styles.length - 1;
-      var style = styles[idx];
-      var weights = [];
-      for (var wi = 0; wi < pool.length; wi++) {
-        weights.push(Math.max(0.01, style.f(signals[pool[wi]])));
-      }
-      var pick = weightedSample(pool, weights, k, rng);
-      for (var j = 0; j < pick.length; j++) counts[pick[j]] += 1;
-    }
-    var max = 1;
-    for (var p = 0; p < pool.length; p++) if (counts[pool[p]] > max) max = counts[pool[p]];
-    var out = {};
-    for (var q = 0; q < pool.length; q++) out[pool[q]] = counts[pool[q]] / max;
-    return out;
-  }
-
-  function buildInfo(pool, signals, sim, omitData) {
+  function buildInfo(pool, signals, omitData) {
     var info = {};
+    var sorted = pool.slice().sort(function (x, y) {
+      return signals[x].trendScore - signals[y].trendScore || x - y;
+    });
+    var rank = {};
+    for (var r = 0; r < sorted.length; r++) rank[sorted[r]] = r + 1;
+
     for (var i = 0; i < pool.length; i++) {
       var n = pool[i];
       var s = signals[n];
-      var trend = clamp((s.trendScore || 0) * 100, 0, 100);
-      var consensus = clamp(0.55 * trend + 0.45 * (sim[n] || 0) * 100, 0, 100);
+      var parts = {
+        hot10: 0.30 * s.hot10,
+        hot30: 0.15 * s.hot30,
+        omit: 0.18 * s.omitNorm,
+        repeat: 0.10 * s.repeat,
+        neighbor: 0.10 * s.neighbor,
+        diagonal: 0.10 * s.diagonal,
+        zone: 0.04 * s.zoneHeat,
+        tail: 0.03 * s.tailHeat,
+      };
+      var consensus = clamp((parts.hot10 + parts.hot30 + parts.omit + parts.repeat +
+        parts.neighbor + parts.diagonal + parts.zone + parts.tail) * 100, 0, 100);
+
       var tags = [];
       if (s.hot10 >= 0.7) tags.push("热号");
       if (omitData.omit[n] >= Math.max(5, omitData.avgOmit[n] * 1.5)) tags.push("高遗漏");
@@ -450,11 +400,12 @@
       if (s.gap5) tags.push("空档");
       if (n > 31) tags.push("非生日");
       if (!tags.length) tags.push("中性");
+
       info[n] = {
         n: n,
-        trend: trend,
-        sim: sim[n] || 0,
         consensus: consensus,
+        parts: parts,
+        rank: rank[n],
         heat10: s.hot10,
         heat30: s.hot30,
         omit: omitData.omit[n],
@@ -465,7 +416,7 @@
     return info;
   }
 
-  function analyze(gameId, windowSize, rng) {
+  function analyze(gameId, windowSize) {
     var game = GAMES[gameId];
     var draws = drawsFor(gameId);
     if (!draws.length) return null;
@@ -486,8 +437,7 @@
     var heat30Norm = normalizeMap(heat30, mainPool);
     var omitNorm = normalizeMap(omitData.omit, mainPool);
     var signals = buildSignals(game, draws, mainPool, "main", heat10Norm, heat30Norm, omitNorm, lastMain, prevMain, prev2Main);
-    var sim = simulatePunters(mainPool, game.mainCount, signals, rng);
-    var mainInfo = buildInfo(mainPool, signals, sim, omitData);
+    var mainInfo = buildInfo(mainPool, signals, omitData);
 
     var specialInfo = null;
     var specialSignals = null;
@@ -499,8 +449,7 @@
       var sHeat30Norm = normalizeMap(sHeat30, specialPool);
       var sOmitNorm = normalizeMap(sOmitData.omit, specialPool);
       specialSignals = buildSignals(game, draws, specialPool, "special", sHeat10Norm, sHeat30Norm, sOmitNorm, lastSpecial, prevSpecial, prev2Special);
-      var sSim = simulatePunters(specialPool, game.specialCount, specialSignals, rng);
-      specialInfo = buildInfo(specialPool, specialSignals, sSim, sOmitData);
+      specialInfo = buildInfo(specialPool, specialSignals, sOmitData);
     }
 
     var sums = [];
@@ -609,121 +558,68 @@
       penalty;
   }
 
-  function buildCandidates(a, rng) {
+  function buildCandidates(a) {
     var pool = a.mainPool;
     var k = a.game.mainCount;
-    var weights = [];
-    for (var i = 0; i < pool.length; i++) {
-      weights.push(Math.max(0.04, 1.55 - a.mainInfo[pool[i]].consensus / 100));
-    }
+    var sorted = pool.slice().sort(function (x, y) {
+      return a.mainInfo[x].consensus - a.mainInfo[y].consensus || x - y;
+    });
+    var top = sorted.slice(0, Math.min(16, sorted.length));
     var lastKey = a.lastMain.slice().sort(function (x, y) { return x - y; }).join(",");
-    var seen = {}, out = [];
-    function add(nums) {
-      nums = nums.slice().sort(function (x, y) { return x - y; });
-      var key = nums.join(",");
-      if (key === lastKey || seen[key]) return;
-      seen[key] = 1;
-      out.push({ nums: nums, key: key, raw: combinationRaw(nums, a) });
-    }
-    for (var t = 0; t < 9000; t++) {
-      if (t < 8200) add(weightedSample(pool, weights, k, rng));
-      else add(shuffle(pool, rng).slice(0, k));
-    }
-    if (!out.length) {
-      for (var j = 0; j < 4000; j++) {
-        var pick = shuffle(pool, rng).slice(0, k).sort(function (x, y) { return x - y; });
-        var key = pick.join(",");
-        if (!seen[key]) {
-          seen[key] = 1;
-          out.push({ nums: pick, key: key, raw: combinationRaw(pick, a) });
-        }
+    var out = [], chosen = [];
+
+    function rec(start) {
+      if (chosen.length === k) {
+        var nums = chosen.slice().sort(function (x, y) { return x - y; });
+        var key = nums.join(",");
+        if (key === lastKey) return;
+        out.push({ nums: nums, key: key, raw: combinationRaw(nums, a) });
+        return;
+      }
+      for (var i = start; i < top.length; i++) {
+        if (top.length - i < k - chosen.length) break;
+        chosen.push(top[i]);
+        rec(i + 1);
+        chosen.pop();
       }
     }
-    out.sort(function (x, y) { return x.raw - y.raw; });
+    rec(0);
+    out.sort(function (x, y) {
+      return x.raw - y.raw || x.key.localeCompare(y.key);
+    });
+    if (!out.length) {
+      var fallback = top.slice(0, k).sort(function (x, y) { return x - y; });
+      out.push({ nums: fallback, key: fallback.join(","), raw: combinationRaw(fallback, a) });
+    }
     return out;
   }
 
-  function buildBaseline(a, rng) {
-    var pool = a.mainPool;
-    var k = a.game.mainCount;
-    var typical = [];
-    for (var i = 0; i < pool.length; i++) {
-      var n = pool[i];
-      var f = a.mainInfo[n];
-      var s = a.signals[n];
-      typical.push(1 + 2 * f.sim + 1.5 * s.trendScore);
-    }
-    var scores = [];
-    for (var t = 0; t < 350; t++) scores.push(combinationRaw(weightedSample(pool, typical, k, rng), a));
-    for (var u = 0; u < 350; u++) scores.push(combinationRaw(shuffle(pool, rng).slice(0, k), a));
-    return scores;
-  }
-
-  function specialPick(a, count, offset) {
+  function specialPick(a, count) {
     if (!a.specialInfo) return [];
     var sorted = a.specialPool.slice().sort(function (x, y) {
-      return a.specialInfo[x].consensus - a.specialInfo[y].consensus;
+      return a.specialInfo[x].consensus - a.specialInfo[y].consensus || x - y;
     });
-    var start = offset || 0;
-    var picked = sorted.slice(start, start + count);
-    if (picked.length < count) {
-      for (var i = 0; i < sorted.length && picked.length < count; i++) {
-        if (picked.indexOf(sorted[i]) < 0) picked.push(sorted[i]);
-      }
-    }
-    return picked.sort(function (x, y) { return x - y; });
+    return sorted.slice(0, count).sort(function (x, y) { return x - y; });
   }
 
-  function countDifferent(a, b) {
-    var diff = 0;
-    for (var i = 0; i < a.length; i++) if (b.indexOf(a[i]) < 0) diff += 1;
-    return diff;
-  }
-
-  function buildRecommendation(a, rng) {
-    var candidates = buildCandidates(a, rng);
-    var baseline = buildBaseline(a, rng);
-    var baselineMax = Math.max.apply(null, baseline) || 1;
-    function antiOf(raw) {
-      // 相对反共识分：越接近 0 越反共识，100 表示几乎完全避开常见偏好
-      return clamp(Math.round((1 - raw / Math.max(1, baselineMax)) * 100), 0, 100);
-    }
-    function riskOf(nums) {
-      var s = 0;
-      for (var i = 0; i < nums.length; i++) s += (a.mainInfo[nums[i]].sim || 0);
-      return clamp(Math.round(s / nums.length * 100), 0, 100);
-    }
+  function buildRecommendation(a) {
+    var candidates = buildCandidates(a);
     var final = candidates[0];
-    var backup = null;
-    for (var bi = 1; bi < candidates.length; bi++) {
-      if (countDifferent(candidates[bi].nums, final.nums) >= 2) { backup = candidates[bi]; break; }
-    }
-    if (!backup) backup = candidates[1] || candidates[0];
     if (!final) return null;
-
-    var sp1 = specialPick(a, a.game.specialCount, 0);
-    var sp2 = specialPick(a, a.game.specialCount, a.game.specialCount);
-    var sets = [
-      {
-        label: "反共识一注",
-        primary: final.nums,
-        special: sp1,
-        anti: antiOf(final.raw),
-        risk: riskOf(final.nums),
-        raw: final.raw,
-      },
-      {
-        label: "备选一注",
-        primary: backup.nums,
-        special: sp2,
-        anti: antiOf(backup.raw),
-        risk: riskOf(backup.nums),
-        raw: backup.raw,
-      },
-    ];
+    var sp = specialPick(a, a.game.specialCount);
+    var avg = 0;
+    for (var i = 0; i < final.nums.length; i++) avg += a.mainInfo[final.nums[i]].consensus;
+    avg = avg / final.nums.length;
+    var set = {
+      label: "固定一注",
+      primary: final.nums,
+      special: sp,
+      anti: clamp(Math.round(100 - avg), 0, 100),
+      avg: Math.round(avg * 10) / 10,
+      raw: final.raw,
+    };
     return {
-      sets: sets,
-      baselineSize: baseline.length,
+      sets: [set],
       candidateCount: candidates.length,
       analysis: a,
       gameId: a.gameId,
@@ -733,18 +629,16 @@
     };
   }
 
-  function ensureReco(force) {
+  function ensureReco() {
     var gameId = state.active;
     var draws = drawsFor(gameId);
     var latest = draws[0] ? draws[0].issue : "";
     var cur = state.reco;
-    var stale = !cur || force || cur.gameId !== gameId || cur.window !== state.window ||
-      cur.latest !== latest || (Date.now() - cur.generatedAt > RECO_MS);
+    var stale = !cur || cur.gameId !== gameId || cur.window !== state.window || cur.latest !== latest;
     if (stale) {
-      var rng = E.makeRng();
-      var analysis = analyze(gameId, state.window, rng);
+      var analysis = analyze(gameId, state.window);
       if (!analysis) return null;
-      state.reco = buildRecommendation(analysis, rng);
+      state.reco = buildRecommendation(analysis);
     }
     return state.reco;
   }
@@ -862,10 +756,10 @@
 
   function introHTML() {
     return '<section class="card intro-card">' +
-      '<div class="intro-eyebrow">V2 · TREND CONSENSUS</div>' +
-      "<h2>大多数彩民不是随机选，而是看走势图</h2>" +
-      "<p>本版把生日号降为极小权重，改用走势图彩民的常见习惯：追热、补冷、看遗漏、重号、邻号、斜连、连号、同尾、区间轮动、和值回归和均衡形态。先模拟他们会怎么选，再刻意反着选一注。目标不是提高中奖率，而是降低撞号分摊。</p>" +
-      '<div class="intro-tags"><span>走势策略</span><span>追热补冷</span><span>重邻斜连</span><span>低共识</span></div>' +
+      '<div class="intro-eyebrow">V3 · FIXED CALC</div>' +
+      "<h2>每个号码单独计算，固定一注</h2>" +
+      "<p>先按走势图给每个号码逐项打分：热号、近30热度、遗漏、重号、邻号、斜连、区间、尾数；再把共识分最低的 16 个号码枚举所有组合，按组合得分排序，固定选出第一注。不使用随机数，点击页面不会换号；只有新开奖数据或切换统计窗口才会重算。</p>" +
+      '<div class="intro-tags"><span>逐号计算</span><span>确定性</span><span>固定一注</span><span>低共识</span></div>' +
       "</section>";
   }
 
@@ -917,25 +811,17 @@
       if (fs.gap5) gaps += 1;
     }
 
-    var backup = reco.sets[1];
-    var backupBalls = backup.primary.map(function (n) {
-      return '<span class="ball ' + mainClass + '">' + two(n) + "</span>";
-    }).join("");
-    var backupSpecial = backup.special.map(function (n) {
-      return '<span class="ball blue">' + two(n) + "</span>";
-    }).join("");
-
     return '<section class="card final-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">✦</span>反共识一注</div>' +
-      '<span class="badge">低撞号候选</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">✦</span>固定一注</div>' +
+      '<span class="badge">当前数据固定</span></div>' +
       '<div class="anti-hero">' +
       '<div class="anti-score-wrap"><span class="anti-score">' + set.anti + '<small>/100</small></span>' +
       '<span class="anti-score-label">反共识度</span></div>' +
       '<div class="anti-metrics">' +
-      '<div><div class="metric-head"><span>模拟撞号风险</span><b>' + set.risk + "/100</b></div>" +
-      '<div class="metric-bar risk"><i style="width:' + set.risk + '%"></i></div></div>' +
-      '<div><div class="metric-head"><span>大众共识度</span><b>' + (100 - set.anti) + "/100</b></div>" +
-      '<div class="metric-bar"><i style="width:' + (100 - set.anti) + '%"></i></div></div>' +
+      '<div><div class="metric-head"><span>平均共识分</span><b>' + set.avg + "/100</b></div>" +
+      '<div class="metric-bar risk"><i style="width:' + Math.round(set.avg) + '%"></i></div></div>' +
+      '<div><div class="metric-head"><span>组合计算得分</span><b>' + set.raw.toFixed(1) + "</b></div>" +
+      '<div class="metric-bar"><i style="width:' + Math.min(100, Math.max(0, set.raw)) + '%"></i></div></div>' +
       "</div></div>" +
       '<div class="final-balls"><div class="balls">' + mainBalls + "</div>" +
       (specialBalls ? '<div class="final-special"><span class="label">' + escapeHtml(game.specialLabel) + "</span>" + specialBalls + "</div>" : "") +
@@ -945,13 +831,53 @@
       "<span>重号 <b>" + repeat + "</b></span><span>邻号 <b>" + neighbors + "</b></span>" +
       "<span>斜连 <b>" + diagonals + "</b></span><span>空档 <b>" + gaps + "</b></span>" +
       "</div>" +
-      '<div class="backup-set"><div class="backup-label"><span>备选一注 · 反共识度 ' + backup.anti + "/100</span>" +
-      copyButtonHTML(setText(reco.gameId, backup), "copy-mini") + "</div>" +
-      '<div class="balls">' + backupBalls + (backupSpecial ? '<span class="plus">＋</span>' + backupSpecial : "") + "</div></div>" +
-      '<div class="rec-foot"><button class="btn btn-primary" type="button" data-action="reshuffle">重新反推</button>' +
-      '<div class="auto-line" data-auto-line><span class="dot"></span><span>每 5 分钟重新反推<br><span data-reco-countdown>05:00</span> 后更新</span></div></div>' +
-      '<p class="anti-note">反共识度与撞号风险只衡量“偏离模拟走势图彩民共识”的程度，不代表中奖概率；每注组合的中奖概率完全相同。</p>' +
+      '<div class="rec-foot"><button class="btn btn-primary" type="button" data-action="calc">查看每个号码的计算</button>' +
+      '<div class="auto-line"><span class="dot"></span><span>当前数据下固定<br>开奖后自动重算</span></div></div>' +
+      '<p class="anti-note">本注由每个号码的走势共识分单独计算，再对所有候选组合做确定性排序选出；不随点击变化。只有新开奖数据或切换统计窗口才会重算。</p>' +
       "</section>";
+  }
+
+  function calcTableHTML(title, pool, info, signals, selected) {
+    var rows = pool.slice().sort(function (x, y) {
+      return info[x].consensus - info[y].consensus || x - y;
+    }).map(function (n) {
+      var f = info[n];
+      var p = f.parts;
+      var isSel = selected.indexOf(n) >= 0;
+      return '<tr class="' + (isSel ? "calc-selected" : "") + '">' +
+        "<td>" + f.rank + "</td>" +
+        '<td class="calc-num">' + two(n) + "</td>" +
+        "<td>" + p.hot10.toFixed(2) + "</td>" +
+        "<td>" + p.hot30.toFixed(2) + "</td>" +
+        "<td>" + p.omit.toFixed(2) + "</td>" +
+        "<td>" + p.repeat.toFixed(2) + "</td>" +
+        "<td>" + p.neighbor.toFixed(2) + "</td>" +
+        "<td>" + p.diagonal.toFixed(2) + "</td>" +
+        "<td>" + p.zone.toFixed(2) + "</td>" +
+        "<td>" + p.tail.toFixed(2) + "</td>" +
+        '<td class="calc-total">' + Math.round(f.consensus) + "</td>" +
+        "<td>" + (isSel ? "入选" : "") + "</td></tr>";
+    }).join("");
+    return '<div class="calc-sub">' + escapeHtml(title) + "</div>" +
+      '<div class="calc-scroll"><table class="calc-table"><thead><tr>' +
+      "<th>排名</th><th>号码</th><th>热10</th><th>热30</th><th>遗漏</th><th>重号</th><th>邻号</th><th>斜连</th><th>区间</th><th>尾数</th><th>共识</th><th>结果</th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+  }
+
+  function calcHTML(reco) {
+    var a = reco.analysis;
+    var set = reco.sets[0];
+    var html = '<section class="card calc-card">' +
+      '<div class="card-head"><div class="card-title"><span class="icon">∑</span>逐号计算明细</div>' +
+      '<span class="badge">确定性 · 无随机</span></div>' +
+      '<p class="hint-text">每个号码先单独计算共识分；分数越低越反共识。最终一注从共识分最低的 16 个号码中枚举所有组合，按组合得分从低到高排序取第一注，不使用随机数。</p>' +
+      '<div class="formula-line">共识分 = 100 × (0.30×热10 + 0.15×热30 + 0.18×遗漏 + 0.10×重号 + 0.10×邻号 + 0.10×斜连 + 0.04×区间 + 0.03×尾数)</div>' +
+      calcTableHTML(a.game.mainLabel, a.mainPool, a.mainInfo, a.signals, set.primary);
+    if (a.specialInfo) {
+      html += calcTableHTML(a.game.specialLabel, a.specialPool, a.specialInfo, a.specialSignals, set.special);
+    }
+    html += "</section>";
+    return html;
   }
 
   function sumChartHTML(a) {
@@ -1047,11 +973,11 @@
     }).join("");
     return '<section class="card rules-card">' +
       '<div class="card-head"><div class="card-title"><span class="icon">◎</span>走势图策略</div>' +
-      '<span class="badge gray">v2 · 走势共识</span></div>' +
+      '<span class="badge gray">v3 · 固定计算</span></div>' +
       '<div class="step-strip">' +
       "<div class=\"step\"><b>1. 读走势</b>热号、冷号、遗漏、区间、和值</div>" +
-      "<div class=\"step\"><b>2. 模拟彩民</b>追热、补冷、重号、邻号、斜连</div>" +
-      "<div class=\"step\"><b>3. 反着选</b>低共识 + 走势空档</div></div>" +
+      "<div class=\"step\"><b>2. 逐号计算</b>每个号码单独打分</div>" +
+      "<div class=\"step\"><b>3. 固定选号</b>枚举组合，取最低分</div></div>" +
       '<ul class="rules-list">' + list + "</ul></section>";
   }
 
@@ -1098,18 +1024,20 @@
 
   function aboutHTML() {
     return '<section class="card about-card">' +
-      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">v2 · 走势共识</span></div>' +
+      '<div class="card-head"><div class="card-title"><span class="icon">ⓘ</span>先把话说清楚</div><span class="badge gray">v3 · 固定计算</span></div>' +
       '<ul class="about-list">' +
       '<li><span class="bullet">1</span><div><b>每注概率相同</b>：双色球/大乐透的每一组号码中奖概率完全一样；反共识不能提高中奖概率，也不能保证“实际会中奖”。</div></li>' +
       '<li><span class="bullet">2</span><div><b>目标只是少分摊</b>：如果中奖，避开大众常用号码，可能减少与其他人同时中奖、分摊奖金的概率。它影响的是“撞号”，不是“中奖”。</div></li>' +
       '<li><span class="bullet">3</span><div><b>返奖率</b>：官方返奖率约 <b>51%</b>（奖金约 50% + 调节基金），不是 40%；浮动奖奖金会按中奖注数分摊，所以“销量高、奖金低”要区分返奖率与分摊。</div></li>' +
       '<li><span class="bullet">4</span><div><b>数据与走势</b>：使用福彩/体彩公开开奖数据，最近 30/100 期统计；走势图只描述过去，不预示未来。</div></li>' +
+      '<li><span class="bullet">5</span><div><b>固定一注</b>：每个号码由走势因子逐项加权计算，组合用确定性枚举排序；刷新页面、重复点击不会换号，只有新开奖数据或切换统计窗口才重算。</div></li>' +
       "</ul>" +
       '<div class="optimization">' +
-      '<div class="opt-title">v2 优化日志</div>' +
+      '<div class="opt-title">v3 优化日志</div>' +
       '<div class="opt-row"><b>v1 问题</b>生日号 / 吉利号 / 尾4 权重过高，反选看起来刻意。</div>' +
-      '<div class="opt-row"><b>v2 改动</b>改为走势图策略：热号、冷号、重号、邻号、斜连、连号、同尾、区间、和值、空档；生日号只保留极小权重。</div>' +
-      '<div class="opt-row"><b>下一步</b>根据反馈继续调整各走势策略权重，持续迭代。</div>' +
+      '<div class="opt-row"><b>v2 问题</b>改为走势图策略，但仍使用随机模拟和重新抽号，点击就换号。</div>' +
+      '<div class="opt-row"><b>v3 改动</b>去掉随机模拟与重新抽号；每个号码单独加权计算共识分，组合用确定性枚举排序，固定一注。</div>' +
+      '<div class="opt-row"><b>下一步</b>根据反馈调整各走势因子的权重，持续迭代。</div>' +
       '</div>' +
       '<div class="rate-note">反共识、冷热、遗漏、连号、同尾都不是“必开信号”。走势图可以用来看，但不能用来承诺结果。</div>' +
       '<div class="about-links"><a href="https://www.cwl.gov.cn/" target="_blank" rel="noopener">中国福利彩票</a>' +
@@ -1129,13 +1057,13 @@
         '<button class="btn btn-ghost" type="button" data-retry style="margin-top:14px">重新加载</button></section>' + introHTML();
       return;
     }
-    var reco = ensureReco(false);
+    var reco = ensureReco();
     if (!reco) return;
     var a = reco.analysis;
     var notice = state.online === false
       ? '<div class="notice"><span class="n-dot"></span><span>网络暂时不可用，正在显示本地缓存。网络恢复后会自动同步。</span></div>'
       : "";
-    dom.main.innerHTML = notice + introHTML() + latestHTML(a) + finalHTML(reco) +
+    dom.main.innerHTML = notice + introHTML() + latestHTML(a) + finalHTML(reco) + calcHTML(reco) +
       trendHTML(a) + rulesHTML(reco) + consensusHTML(reco) + aboutHTML();
     tick();
   }
@@ -1157,18 +1085,6 @@
     if (fetchEls.length) {
       var secs = Math.max(0, Math.ceil((state.nextFetch - Date.now()) / 1000));
       fetchEls.forEach(function (el) { el.textContent = secs + " 秒后检查"; });
-    }
-    var reco = state.reco;
-    var recoEls = $$("[data-reco-countdown]");
-    if (reco && recoEls.length) {
-      var left = Math.max(0, reco.generatedAt + RECO_MS - Date.now());
-      var label = E.formatDuration(left);
-      recoEls.forEach(function (el) { el.textContent = label; });
-      if (left <= 0 && document.visibilityState === "visible" && Date.now() - state.lastRecoRender > 3000) {
-        state.lastRecoRender = Date.now();
-        ensureReco(true);
-        render();
-      }
     }
   }
 
@@ -1234,10 +1150,9 @@
         return;
       }
       var action = e.target.closest("[data-action]");
-      if (action && action.getAttribute("data-action") === "reshuffle") {
-        state.reco = null;
-        render();
-        toast("已重新反推，仅供娱乐");
+      if (action && action.getAttribute("data-action") === "calc") {
+        var calc = document.querySelector(".calc-card");
+        if (calc) calc.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
       if (e.target.closest("[data-retry]")) fetchData(true);
