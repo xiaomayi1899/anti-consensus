@@ -1,5 +1,5 @@
 /* 反共识选号 Service Worker：应用壳离线可用，开奖数据网络优先 */
-const VERSION = "2026.11.15.3";
+const VERSION = "2026.11.15.4";
 const SHELL_CACHE = `anti-shell-${VERSION}`;
 const DATA_CACHE = `anti-data-${VERSION}`;
 
@@ -7,9 +7,9 @@ const SHELL_ASSETS = [
   "./",
   "./index.html",
   "./assets/style.css",
-  "./assets/contrarian.css",
+  "./assets/contrarian.css?v=3",
   "./assets/engine.js",
-  "./assets/contrarian.js",
+  "./assets/contrarian.js?v=3",
   "./manifest.webmanifest",
   "./icons/icon-32.png",
   "./icons/icon-180.png",
